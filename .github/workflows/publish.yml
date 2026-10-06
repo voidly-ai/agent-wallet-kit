@@ -1,0 +1,54 @@
+name: Publish agent wallet with provenance
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agent-wallet-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.repository == 'voidly-ai/agent-wallet-kit' && github.ref_name != 'v0.1.0' }}
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Verify tag, source and new version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (pkg.name !== '@voidly/agent-wallet') throw new Error('Unexpected package name');
+          if (pkg.repository?.url !== 'https://github.com/voidly-ai/agent-wallet-kit') throw new Error('Repository URL mismatch');
+          if (process.env.RELEASE_TAG !== `v${pkg.version}`) throw new Error('Tag must match package version');
+          if (pkg.version === '0.1.0') throw new Error('0.1.0 is the owner bootstrap release');
+          const url = `https://registry.npmjs.org/@voidly%2fagent-wallet/${encodeURIComponent(pkg.version)}`;
+          const response = await fetch(url, { headers: { accept: 'application/json' } });
+          if (response.status === 200) throw new Error(`Version ${pkg.version} already exists on npm`);
+          if (response.status !== 404) throw new Error(`Could not verify version absence: HTTP ${response.status}`);
+          NODE
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test with bounded concurrency
+        run: node --test-concurrency=4 --import tsx --test test/*.test.ts
+      - name: Build
+        run: npm run build
+      - name: Publish by npm trusted publisher with provenance
+        run: npm publish --provenance --access public
