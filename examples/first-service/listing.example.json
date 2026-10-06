@@ -1,0 +1,24 @@
+{
+  "name": "Example answer service",
+  "description": "A template for a seller-owned JSON API; replace the sample URL and review the price before submission.",
+  "category": "research",
+  "upstreamUrl": "https://seller.example.com/service",
+  "method": "POST",
+  "priceAtomic": 10000,
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string", "maxLength": 500 }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["answer"],
+    "properties": {
+      "answer": { "type": "string" }
+    }
+  }
+}
