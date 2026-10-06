@@ -75,11 +75,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
       - name: Verify registry metadata matches the released npm package
         run: |
           node --input-type=module <<'NODE'
@@ -95,6 +99,62 @@ jobs:
           if (server.packages?.length !== 1 || server.packages[0].registryType !== 'npm' ||
               server.packages[0].identifier !== pkg.name || server.packages[0].version !== pkg.version ||
               server.packages[0].transport?.type !== 'stdio') throw new Error('MCP package mismatch');
+          NODE
+      - name: Wait for exact npm version visibility
+        timeout-minutes: 11
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { setTimeout as sleep } from 'node:timers/promises';
+
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const url = `https://registry.npmjs.org/@voidly%2fagent-wallet/${encodeURIComponent(pkg.version)}`;
+          const deadline = performance.now() + 10 * 60_000;
+          let attempts = 0;
+          let visible = false;
+
+          while (performance.now() < deadline) {
+            attempts += 1;
+            const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+            let response;
+            try {
+              response = await fetch(url, {
+                headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+                signal: AbortSignal.timeout(Math.min(10_000, remaining)),
+              });
+            } catch (error) {
+              console.warn(`npm visibility request ${attempts} failed: ${error.message}`);
+            }
+
+            if (response?.status === 200) {
+              let record;
+              try {
+                record = await response.json();
+              } catch (error) {
+                throw new Error('npm returned malformed version metadata', { cause: error });
+              }
+              if (record.name !== pkg.name || record.version !== pkg.version || record.mcpName !== pkg.mcpName) {
+                throw new Error('npm version metadata does not match the release');
+              }
+              console.log(`npm ${pkg.name}@${pkg.version} visible after ${attempts} request(s)`);
+              visible = true;
+              break;
+            }
+
+            if (response) {
+              const status = response.status;
+              await response.body?.cancel();
+              if (status !== 404 && status !== 429 && (status < 500 || status > 599)) {
+                throw new Error(`Unexpected npm visibility status: HTTP ${status}`);
+              }
+              console.log(`npm ${pkg.name}@${pkg.version} not visible yet (HTTP ${status})`);
+            }
+
+            const waitMs = Math.min(20_000, Math.max(0, Math.floor(deadline - performance.now())));
+            if (waitMs > 0) await sleep(waitMs);
+          }
+
+          if (!visible) throw new Error(`npm ${pkg.name}@${pkg.version} was not visible within 10 minutes`);
           NODE
       - name: Install MCP Registry publisher
         run: |
