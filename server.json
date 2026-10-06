@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.voidly-ai/agent-wallet-kit",
+  "title": "Voidly Agent Wallet",
+  "description": "Local Base USDC wallet for agents with capped x402 payments and Marketplace recovery.",
+  "repository": {
+    "url": "https://github.com/voidly-ai/agent-wallet-kit",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@voidly/agent-wallet",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
