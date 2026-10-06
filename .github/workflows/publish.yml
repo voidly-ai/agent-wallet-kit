@@ -33,8 +33,23 @@ jobs:
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          const server = JSON.parse(readFileSync('server.json', 'utf8'));
+          const expectedMcpName = 'io.github.voidly-ai/agent-wallet-kit';
           if (pkg.name !== '@voidly/agent-wallet') throw new Error('Unexpected package name');
           if (pkg.repository?.url !== 'https://github.com/voidly-ai/agent-wallet-kit') throw new Error('Repository URL mismatch');
+          if (lock.name !== pkg.name || lock.version !== pkg.version ||
+              lock.packages?.['']?.name !== pkg.name || lock.packages?.['']?.version !== pkg.version) {
+            throw new Error('Lockfile identity or version mismatch');
+          }
+          if (pkg.mcpName !== expectedMcpName || server.name !== expectedMcpName ||
+              server.version !== pkg.version || server.repository?.url !== pkg.repository?.url ||
+              server.repository?.source !== 'github' ||
+              server.packages?.length !== 1 || server.packages[0].registryType !== 'npm' ||
+              server.packages[0].identifier !== pkg.name || server.packages[0].version !== pkg.version ||
+              server.packages[0].transport?.type !== 'stdio') {
+            throw new Error('MCP Registry identity or version mismatch');
+          }
           if (process.env.RELEASE_TAG !== `v${pkg.version}`) throw new Error('Tag must match package version');
           if (pkg.version === '0.1.0') throw new Error('0.1.0 is the owner bootstrap release');
           const url = `https://registry.npmjs.org/@voidly%2fagent-wallet/${encodeURIComponent(pkg.version)}`;
