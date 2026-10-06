@@ -4,7 +4,7 @@ A locally held Base USDC wallet for agents. It exposes an ESM library and a stdi
 
 ## Run the MCP server
 
-Install the exact package version in your agent project:
+Once 0.1.1 is published, install the exact package version in your agent project:
 
 ```sh
 npm install --save-exact @voidly/agent-wallet@0.1.1
@@ -34,11 +34,11 @@ These examples run the local stdio server from `@voidly/agent-wallet@0.1.1` once
 In the Claude Code project that needs the wallet, add it with local scope:
 
 ```sh
-claude mcp add --transport stdio \
+claude mcp add \
   --env VOIDLY_WALLET_NETWORK=base-sepolia \
   --env VOIDLY_WALLET_PER_CALL_USDC=0.02 \
   --env VOIDLY_WALLET_DAILY_USDC=0.05 \
-  voidly-agent-wallet -- npx -y @voidly/agent-wallet@0.1.1
+  --transport stdio voidly-agent-wallet -- npx -y @voidly/agent-wallet@0.1.1
 ```
 
 For Cursor, create `.cursor/mcp.json` in the project:
@@ -60,7 +60,7 @@ For Cursor, create `.cursor/mcp.json` in the project:
 }
 ```
 
-The default local state directory is `~/.local/state/voidly-agent-wallet`. Set `VOIDLY_WALLET_STATE_DIR` to a private, durable path if you need a different location, and preserve the full directory across restarts. The examples contain no wallet key or recovery secret. Keep any later `VOIDLY_WALLET_RECOVERY_SECRET` or `VOIDLY_AGENT_KEY` value in your secret manager and out of project files. Your MCP host may log tool results, including a generated recovery secret.
+By default, local state uses `$XDG_STATE_HOME/voidly-agent-wallet` when `XDG_STATE_HOME` is set, or `~/.local/state/voidly-agent-wallet` otherwise. `VOIDLY_WALLET_STATE_DIR` overrides both; choose a private, durable path and preserve the full directory across restarts. The examples contain no wallet key or recovery secret. Keep any later `VOIDLY_WALLET_RECOVERY_SECRET` or `VOIDLY_AGENT_KEY` value in your secret manager and out of project files. Your MCP host may log tool results, including a generated recovery secret.
 
 ## MCP tools
 
