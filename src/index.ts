@@ -21,13 +21,19 @@ import {
 } from './spend.js';
 import { checkedMarketplaceOrigin, MARKETPLACE_ORIGINS, type MarketplaceAttempt, type MarketplaceAttemptStore } from './marketplaceRecovery.js';
 import { verifyMarketplaceOutcome } from './marketplaceReceiptVerification.js';
-import { prepareVoidlySellerRegistration as prepareSellerRegistration, type PreparedVoidlySellerRegistration } from './sellerRegistration.js';
+import { prepareVoidlySellerRegistration as prepareSellerRegistration,
+  prepareVoidlySellerListingCreate as prepareSellerListingCreate,
+  validateVoidlySellerListingInput,
+  type PreparedVoidlySellerRegistration, type PreparedVoidlySellerListingCreate,
+  type VoidlySellerListingInput } from './sellerRegistration.js';
 
 export * from './backup.js';
 export * from './spend.js';
 export * from './marketplaceRecovery.js';
 export * from './marketplaceReceiptVerification.js';
-export type { PreparedVoidlySellerRegistration } from './sellerRegistration.js';
+export type { PreparedVoidlySellerRegistration, PreparedVoidlySellerListingCreate,
+  VoidlySellerListingInput } from './sellerRegistration.js';
+export { validateVoidlySellerListingInput };
 
 export interface AgentWalletOptions {
   network: BaseNetwork;
@@ -54,6 +60,8 @@ export interface PayX402Request {
   body?: unknown;
   /** A call-specific cap may lower the configured per-call limit. */
   maxAmountUsd?: string;
+  /** Pin public Marketplace detail to the signed live quote before authorizing payment. */
+  expectedMarketplace?: { listingId: string; version: number; payTo: `0x${string}` };
 }
 
 /** A signed paid retry was dispatched; the caller must recover, never pay again. */
@@ -294,6 +302,18 @@ export class AgentWallet {
     });
   }
 
+  /** Sign only a validated, one-use Voidly listing-create challenge. Never submits it. */
+  async prepareVoidlySellerListingCreate(payload: VoidlySellerListingInput): Promise<PreparedVoidlySellerListingCreate> {
+    return prepareSellerListingCreate({
+      network: this.network,
+      address: this.address,
+      allowedOrigins: this.options.allowedOrigins ?? [],
+      signer: this.signer,
+      fetcher: this.options.fetcher ?? fetch,
+      payload,
+    });
+  }
+
   async balance(): Promise<{ address: `0x${string}`; network: BaseNetwork; usdcAtomic: string; usdc: string }> {
     const config = NETWORKS[this.network];
     const atomic = this.options.balanceReader
@@ -390,6 +410,12 @@ export class AgentWallet {
     if (method !== 'GET' && method !== 'POST') throw new Error('Only GET and POST x402 calls are supported');
     if (method === 'GET' && request.body !== undefined) throw new Error('GET payment cannot contain a body');
     const listingId = marketplaceListingId(target, this.network);
+    const expected = request.expectedMarketplace;
+    if (expected && (!listingId || expected.listingId !== listingId ||
+      !Number.isSafeInteger(expected.version) || expected.version < 1 ||
+      !ADDRESS.test(expected.payTo))) {
+      throw new Error('Invalid expected Marketplace listing');
+    }
     const attemptStore = this.options.marketplaceAttemptStore;
     if (listingId && (!attemptStore ||
       attemptStore.kind !== 'durable' && !this.options.unsafeAllowVolatileSpendStoreForTests)) {
@@ -453,6 +479,10 @@ export class AgentWallet {
           intent.amountAtomic !== requirements.amount ||
           !ADDRESS.test(requirements.payTo)) {
           return { abort: true, reason: 'Marketplace quote binding is invalid' };
+        }
+        if (expected && (intent.listingVersion !== expected.version ||
+          requirements.payTo.toLowerCase() !== expected.payTo.toLowerCase())) {
+          return { abort: true, reason: 'Marketplace quote differs from the selected listing version or seller' };
         }
         pendingAttempt = {
           version: 1, wallet: this.address.toLowerCase() as `0x${string}`,

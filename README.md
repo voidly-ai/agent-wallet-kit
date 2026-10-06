@@ -1,10 +1,58 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents. It exposes an ESM library and a stdio MCP server for receiving USDC, bounded x402 payments, and recovery of Voidpay Marketplace results. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI for seller onboarding and bounded Marketplace purchases. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+
+## Sell and buy from the 0.2.0 source candidate
+
+Build this checkout with `npm ci && npm run build`. The commands below use an **existing encrypted local wallet** in `VOIDLY_WALLET_STATE_DIR` (or the default state directory described below) and the matching `VOIDLY_WALLET_RECOVERY_SECRET` supplied by your secret manager. They never create a new wallet or accept a private key on the command line. `--network` is required for each invocation.
+
+Create `listing.json` with the service that your HTTPS upstream will provide:
+
+```json
+{
+  "name": "Example text service",
+  "description": "Returns a short text response for a prompt.",
+  "category": "text",
+  "upstreamUrl": "https://seller.example.com/service",
+  "method": "POST",
+  "priceAtomic": 10000,
+  "inputSchema": { "type": "object" },
+  "outputSchema": { "type": "object" }
+}
+```
+
+`priceAtomic` is USDC with six decimal places, so `10000` is 0.01 USDC. Run a local validation pass, then create the listing:
+
+```sh
+node dist/cli.js sell --network base-sepolia --listing ./listing.json --dry-run
+node dist/cli.js sell --network base-sepolia --listing ./listing.json
+```
+
+`sell` signs the exact seller registration and listing creation challenges, submits both, and returns a **pending** listing ID and version. It writes the gateway's one-time HMAC health secret to a private, newly created file under the wallet state directory and prints only that file path. You may select another existing private directory with `--secret-file /absolute/private/path.json`; the target file must not already exist. Install that secret and listing ID on your upstream, then complete the gateway's separate health check and activation step. A pending listing is not yet a live catalog service. If the create response is uncertain, do not retry: retain the private attempt marker and seek seller API or operator reconciliation, because a retry can create a second listing.
+
+To buy a live seller listing, put the service input in `input.json`, find its exact ID and version in the Marketplace catalog, and choose all three caps yourself:
+
+```sh
+node dist/cli.js buy svc_0123456789 --network base-sepolia --version 1 \
+  --input ./input.json --per-call-usdc 0.02 --daily-usdc 0.05 --max-usdc 0.01 --dry-run
+node dist/cli.js buy svc_0123456789 --network base-sepolia --version 1 \
+  --input ./input.json --per-call-usdc 0.02 --daily-usdc 0.05 --max-usdc 0.01
+```
+
+Replace the sample ID, version, and input with a real live listing. For Base mainnet, use `--network base`; it selects the fixed production gateway and Circle-issued Base USDC. The command fetches one exact live seller detail record, rejects a listed price above `--max-usdc`, and pins its ID, version, and seller wallet to the signed x402 quote before authorization. The durable local spend ledger enforces the per-call and UTC-day caps. `--dry-run` only checks local arguments and JSON; it never loads the wallet, contacts a gateway, signs, or pays. An actual purchase returns `verifiedStatus` (`delivered` or `refund_owed`), the HTTP result, and available receipt metadata as JSON. `refund_owed` is an obligation, not a completed refund. If it reports `paymentMayHaveSettled: true` or an incomplete body, preserve the attempt and recover the original quote; **do not run `buy` again for that attempt**.
+
+The CLI reads the same durable Marketplace attempts as the MCP wallet. To find or recover the original quote without another payment:
+
+```sh
+node dist/cli.js attempts --network base-sepolia
+node dist/cli.js recover 0xYOUR_ORIGINAL_64_HEX_QUOTE_ID --network base-sepolia
+```
+
+Use the exact quote ID from the uncertain result, signed receipt, or retained attempt list. Keep the wallet state directory and recovery secret across restarts; restoring only the wallet key does not recreate past payment attempts. A verified `refund_owed` result and an incomplete result exit with nonzero status so scripts do not mistake them for delivery.
 
 ## Run the MCP server
 
-Once 0.1.1 is published, install the exact package version in your agent project:
+For the pinned 0.1.1 MCP release, install the exact package version in your agent project:
 
 ```sh
 npm install --save-exact @voidly/agent-wallet@0.1.1
@@ -104,8 +152,8 @@ After a signed retry, `paymentMayHaveSettled: true` means **do not pay again**. 
 
 ## Library entry point
 
-`import { AgentWallet } from '@voidly/agent-wallet'` provides `create`, `fromPrivateKey`, and `fromSigner`. A wallet instance offers `address`, `receiveInfo()`, `fundingRequest()`, `balance()`, `prepareVoidlySellerRegistration()`, `payX402()`, `marketplaceAttempts()`, `recoverMarketplace(quoteId)`, and `backupToStore(secret, store)`. The package also exports the file and Relay backup stores, durable spend and attempt stores, and recovery-secret helpers. Library callers must configure the included durable stores or equivalent implementations before paying and must retain their recovery secret outside the package.
+`import { AgentWallet } from '@voidly/agent-wallet'` provides `create`, `fromPrivateKey`, and `fromSigner`. A wallet instance offers `address`, `receiveInfo()`, `fundingRequest()`, `balance()`, `prepareVoidlySellerRegistration()`, `prepareVoidlySellerListingCreate(payload)`, `payX402()`, `marketplaceAttempts()`, `recoverMarketplace(quoteId)`, and `backupToStore(secret, store)`. The package also exports the file and Relay backup stores, durable spend and attempt stores, and recovery-secret helpers. Library callers must configure the included durable stores or equivalent implementations before paying and must retain their recovery secret outside the package.
 
 With `fromSigner`, seller registration and Marketplace recovery also require an EIP-191 `signMessage` method.
 
-The built-in create and restore paths hold the plaintext key locally; optional Relay backup sends a client-encrypted wallet-key envelope. Relay can associate the backup with its wallet address and authenticated agent account; this path does not send the plaintext wallet key or recovery secret. `fromSigner` uses a caller-supplied signer, whose custody depends on its implementation. Spend caps govern calls made through this wallet only. Seller signing is limited to registration. Creating and activating a listing still require separately scoped signatures from a signer controlling the same payout address.
+The built-in create and restore paths hold the plaintext key locally; optional Relay backup sends a client-encrypted wallet-key envelope. Relay can associate the backup with its wallet address and authenticated agent account; this path does not send the plaintext wallet key or recovery secret. `fromSigner` uses a caller-supplied signer, whose custody depends on its implementation. Spend caps govern calls made through this wallet only. Seller signing is limited to fixed registration and listing creation mutations; activation remains a separate seller action after upstream health setup.

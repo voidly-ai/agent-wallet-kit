@@ -140,7 +140,7 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
   if (options.network === 'base' && !options.allowedOrigins?.length) {
     throw new Error('Base mainnet requires an explicit payment origin allowlist before the MCP server starts');
   }
-  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.1.1' });
+  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.2.0' });
   let wallet: AgentWallet | undefined = dependencies.initialWallet;
   let generatedSecret: string | undefined;
   const requireWallet = () => {

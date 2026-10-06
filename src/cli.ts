@@ -1,0 +1,432 @@
+#!/usr/bin/env node
+import { randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, unlink, type FileHandle } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { fetchMarketplaceListing } from './buyListing.js';
+import {
+  AgentWallet, FileMarketplaceAttemptStore, FileSpendStore, LocalWalletBackupStore,
+  PaymentMayHaveSettledError, usdToAtomic, validateSpendLimits,
+  validateVoidlySellerListingInput, type AgentWalletOptions, type BaseNetwork,
+  type SpendLimits,
+} from './index.js';
+
+const ORIGINS = {
+  base: 'https://x402.voidly.ai',
+  'base-sepolia': 'https://x402-staging.voidly.ai',
+} as const;
+const LISTING_ID = /^[a-z0-9][a-z0-9_-]{7,63}$/;
+const SECRET_HEX = /^[0-9a-f]{64}$/;
+const QUOTE_ID = /^0x[0-9a-f]{64}$/;
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const MAX_FILE_BYTES = 65_536;
+const MAX_SELLER_REPLY_BYTES = 16_384;
+
+type CliWallet = Pick<AgentWallet, 'address' | 'network' | 'prepareVoidlySellerRegistration' |
+  'prepareVoidlySellerListingCreate' | 'payX402' | 'marketplaceAttempts' | 'recoverMarketplace'>;
+
+export interface WalletCliDependencies {
+  /** Offline test seams. Runtime always uses platform fetch and an encrypted local vault. */
+  fetcher?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
+  restoreWallet?: (input: { network: BaseNetwork; limits: SpendLimits; stateDir: string;
+    origin: string; mode: 'sell' | 'buy' | 'recover'; fetcher: typeof fetch }) => Promise<CliWallet>;
+}
+
+export class SellerCreationUncertainError extends Error {
+  readonly code = 'seller_creation_uncertain';
+  readonly doNotRetry = true;
+  constructor(readonly secretFile: string) {
+    super('Listing creation may have succeeded. Do not retry; keep the attempt marker and seek seller API or operator reconciliation.');
+  }
+}
+
+export class SellerSecretPersistenceError extends Error {
+  readonly code = 'seller_secret_persistence_failed';
+  readonly doNotRetry = true;
+  constructor(readonly listingId: string, readonly secretFile: string) {
+    super('Listing was created but its one-time health secret was not durably saved. Rotate the secret before activation.');
+  }
+}
+
+const USAGE = `voidly-agent-wallet sell --network base|base-sepolia --listing listing.json [--secret-file /private/path.json] [--dry-run]
+voidly-agent-wallet buy <listing-id> --network base|base-sepolia --version N --input input.json --per-call-usdc AMOUNT --daily-usdc AMOUNT --max-usdc AMOUNT [--dry-run]
+voidly-agent-wallet attempts --network base|base-sepolia
+voidly-agent-wallet recover <quote-id> --network base|base-sepolia
+
+Both commands restore an existing encrypted local wallet with VOIDLY_WALLET_RECOVERY_SECRET.
+sell registers the payout wallet and creates a pending listing. Activate it after installing the one-time health secret on your upstream.
+buy makes one bounded x402 call. An uncertain paid retry must be recovered with the original quote ID; never run buy again for that attempt.`;
+
+function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recover' | 'help'; positional: string[]; flags: Map<string, string> } {
+  if (argv.length === 0 || argv[0] === 'help' || argv[0] === '--help') {
+    return { command: 'help', positional: [], flags: new Map() };
+  }
+  const command = argv[0];
+  if (command !== 'sell' && command !== 'buy' && command !== 'attempts' && command !== 'recover') throw new Error(USAGE);
+  const flags = new Map<string, string>();
+  const positional: string[] = [];
+  const allowed = command === 'sell'
+    ? new Set(['network', 'listing', 'secret-file', 'dry-run'])
+    : command === 'buy'
+      ? new Set(['network', 'version', 'input', 'per-call-usdc', 'daily-usdc', 'max-usdc', 'dry-run'])
+      : new Set(['network']);
+  for (let i = 1; i < argv.length; i++) {
+    const part = argv[i]!;
+    if (!part.startsWith('--')) { positional.push(part); continue; }
+    const key = part.slice(2);
+    if (!allowed.has(key) || flags.has(key)) throw new Error(`Unknown or repeated option: ${part}`);
+    if (key === 'dry-run') { flags.set(key, '1'); continue; }
+    const value = argv[++i];
+    if (!value || value.startsWith('--')) throw new Error(`Missing value for ${part}`);
+    flags.set(key, value);
+  }
+  if (command === 'sell' && positional.length !== 0 || command === 'buy' && positional.length !== 1 ||
+    command === 'attempts' && positional.length !== 0 || command === 'recover' && positional.length !== 1) {
+    throw new Error(USAGE);
+  }
+  return { command, positional, flags };
+}
+
+function required(flags: Map<string, string>, key: string): string {
+  const value = flags.get(key);
+  if (!value) throw new Error(`--${key} is required`);
+  return value;
+}
+
+function networkFlag(flags: Map<string, string>): BaseNetwork {
+  const network = required(flags, 'network');
+  if (network !== 'base' && network !== 'base-sepolia') throw new Error('--network must be base or base-sepolia');
+  return network;
+}
+
+function stateDirectory(env: NodeJS.ProcessEnv): string {
+  return env.VOIDLY_WALLET_STATE_DIR ??
+    join(env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), 'voidly-agent-wallet');
+}
+
+async function jsonFile(path: string): Promise<unknown> {
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > MAX_FILE_BYTES) {
+    throw new Error('JSON input must be a regular file of at most 65,536 bytes');
+  }
+  const bytes = await readFile(path);
+  if (bytes.byteLength > MAX_FILE_BYTES) throw new Error('JSON input is too large');
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { throw new Error('Input file must contain valid UTF-8 JSON'); }
+}
+
+async function defaultRestore(input: { network: BaseNetwork; limits: SpendLimits;
+  stateDir: string; origin: string; mode: 'sell' | 'buy' | 'recover'; fetcher: typeof fetch },
+  env: NodeJS.ProcessEnv): Promise<CliWallet> {
+  const secret = env.VOIDLY_WALLET_RECOVERY_SECRET;
+  if (!secret || Buffer.byteLength(secret, 'utf8') < 16) {
+    throw new Error('VOIDLY_WALLET_RECOVERY_SECRET must be loaded from your secret manager');
+  }
+  const spendStore = input.mode === 'buy' ? new FileSpendStore(input.stateDir) : undefined;
+  const options: AgentWalletOptions = {
+    network: input.network, limits: input.limits, allowedOrigins: [input.origin],
+    spendStore,
+    marketplaceAttemptStore: input.mode !== 'sell' ? new FileMarketplaceAttemptStore(input.stateDir) : undefined,
+    fetcher: input.fetcher,
+  };
+  const wallet = await AgentWallet.restoreFromStore(secret, new LocalWalletBackupStore(input.stateDir), options);
+  if (spendStore) await spendStore.initialize(wallet.address, input.network, true);
+  return wallet;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+
+async function privateSecretFile(path: string, createParent: boolean): Promise<FileHandle> {
+  if (!isAbsolute(path)) throw new Error('Seller secret file path must be absolute');
+  const parent = dirname(path);
+  if (createParent) {
+    try { await mkdir(parent, { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+  const stat = await lstat(parent);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 ||
+    typeof process.getuid === 'function' && stat.uid !== process.getuid() ||
+    await realpath(parent) !== resolve(parent)) {
+    throw new Error('Seller secret directory must be private, owned by this user, and contain no symlinks');
+  }
+  if (createParent) await syncDirectory(dirname(parent));
+  return open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+}
+
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Buffer> {
+  const declared = response.headers.get('content-length');
+  if (declared !== null && (!/^(0|[1-9][0-9]*)$/.test(declared) || BigInt(declared) > BigInt(maxBytes))) {
+    throw new Error('Response exceeds the size limit');
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Response has no body');
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const deadline = Date.now() + 10_000;
+  try {
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('Response body timed out');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Response body timed out')), remainingMs);
+        }),
+      ]).finally(() => { if (timer) clearTimeout(timer); });
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > maxBytes) throw new Error('Response exceeds the size limit');
+      chunks.push(next.value);
+    }
+  } finally { void reader.cancel().catch(() => undefined); }
+  return Buffer.concat(chunks, size);
+}
+
+async function sellerJson(response: Response, expectedUrl: string, expectedStatus: number): Promise<Record<string, unknown>> {
+  if (response.status !== expectedStatus || response.redirected || response.url && response.url !== expectedUrl ||
+    !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get('content-type') ?? '')) {
+    throw new Error(`Seller endpoint did not return the expected response (HTTP ${response.status})`);
+  }
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+    await readBoundedBytes(response, MAX_SELLER_REPLY_BYTES))); }
+  catch { throw new Error('Seller endpoint returned invalid JSON'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Seller endpoint returned an invalid result');
+  }
+  return value as Record<string, unknown>;
+}
+
+async function postSeller(fetcher: typeof fetch, url: string, body: unknown, status: number): Promise<Record<string, unknown>> {
+  const response = await fetcher(url, {
+    method: 'POST', redirect: 'manual', credentials: 'omit', cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return sellerJson(response, url, status);
+}
+
+async function paidResponse(response: Response, verifiedStatus: 'delivered' | 'refund_owed',
+  network: BaseNetwork): Promise<Record<string, unknown>> {
+  let receipt: string | null = null;
+  let quoteId: string | null = null;
+  const base = { httpStatus: response.status, receiptVerified: true, verifiedStatus,
+    refundOwed: verifiedStatus === 'refund_owed', doNotRepay: true };
+  try {
+    receipt = response.headers.get('x-voidpay-delivery-receipt');
+    const paymentResponse = response.headers.get('payment-response');
+    if (receipt && receipt.length <= 16_384) {
+      const value: unknown = JSON.parse(Buffer.from(receipt, 'base64url').toString('utf8'));
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const candidate = (value as Record<string, unknown>).quoteId;
+        if (typeof candidate === 'string' && QUOTE_ID.test(candidate)) quoteId = candidate;
+      }
+    }
+    const recoveryCommand = quoteId
+      ? `voidly-agent-wallet recover ${quoteId} --network ${network}`
+      : `voidly-agent-wallet attempts --network ${network}`;
+    if (receipt && receipt.length > 16_384 || paymentResponse && paymentResponse.length > 16_384) {
+      return { ...base, quoteId, bodyComplete: false, recoveryCommand,
+        recoveryHint: 'Paid response metadata exceeded the limit. Preserve the original Marketplace attempt.' };
+    }
+    const bytes = await readBoundedBytes(response, 1_000_000);
+    let bodyUtf8: string | null;
+    try { bodyUtf8 = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { bodyUtf8 = null; }
+    return { ...base, quoteId, receipt, paymentResponse,
+      bodyUtf8, bodyBase64: bodyUtf8 === null ? bytes.toString('base64') : undefined,
+      bodyComplete: true, recoveryCommand };
+  } catch {
+    return { ...base, quoteId, receipt: receipt && receipt.length <= 16_384 ? receipt : null,
+      bodyComplete: false,
+      recoveryCommand: quoteId
+        ? `voidly-agent-wallet recover ${quoteId} --network ${network}`
+        : `voidly-agent-wallet attempts --network ${network}`,
+      recoveryHint: 'Paid response output is incomplete. Preserve the original Marketplace attempt.' };
+  }
+}
+
+/** One CLI invocation; tests inject inert wallets and transport, never real payments. */
+export async function runWalletCli(argv: string[], dependencies: WalletCliDependencies = {}): Promise<Record<string, unknown>> {
+  const { command, positional, flags } = parse(argv);
+  if (command === 'help') return { usage: USAGE };
+  const network = networkFlag(flags);
+  const origin = ORIGINS[network];
+  const env = dependencies.env ?? process.env;
+  const fetcher = dependencies.fetcher ?? fetch;
+  const stateDir = stateDirectory(env);
+  const restore = dependencies.restoreWallet ?? (input => defaultRestore(input, env));
+
+  if (command === 'attempts' || command === 'recover') {
+    const quoteId = command === 'recover' ? positional[0]! : null;
+    if (quoteId !== null && !QUOTE_ID.test(quoteId)) throw new Error('Invalid Marketplace quote ID');
+    const wallet = await restore({ network, limits: { perCallUsd: '1', dailyUsd: '1' },
+      stateDir, origin, mode: 'recover', fetcher });
+    if (wallet.network !== network) throw new Error('Restored wallet network differs from --network');
+    if (command === 'attempts') {
+      const attempts = await wallet.marketplaceAttempts();
+      return { command, network, attempts: attempts.map(attempt => ({
+        quoteId: attempt.quoteId, listingId: attempt.listingId,
+        listingVersion: attempt.listingVersion, createdAt: attempt.createdAt,
+      })) };
+    }
+    const recovered = await wallet.recoverMarketplace(quoteId!);
+    return { command, network, archivePending: recovered.archivePending,
+      ...(await paidResponse(recovered.response, recovered.verifiedStatus, network)),
+      quoteId: recovered.quoteId };
+  }
+
+  if (command === 'sell') {
+    const payload = validateVoidlySellerListingInput(await jsonFile(required(flags, 'listing')));
+    if (payload.method !== 'POST') throw new Error('CLI seller listings must use POST');
+    if (flags.has('dry-run')) {
+      return { command, network, gateway: origin, status: 'ready', name: payload.name,
+        priceAtomic: payload.priceAtomic, upstreamUrl: payload.upstreamUrl,
+        effect: 'Registration and pending listing creation only; no signing or network request in this dry run.' };
+    }
+    const secretPath = flags.get('secret-file') ?? join(stateDir, 'seller-secrets', `${randomUUID()}.json`);
+    const secretFile = await privateSecretFile(secretPath, !flags.has('secret-file'));
+    let createDispatched = false;
+    let createdListingId: string | null = null;
+    let output: Record<string, unknown> | undefined;
+    let failure: unknown;
+    try {
+      const wallet = await restore({ network, limits: { perCallUsd: '1', dailyUsd: '1' },
+        stateDir, origin, mode: 'sell', fetcher });
+      if (wallet.network !== network) throw new Error('Restored wallet network differs from --network');
+      const registration = await wallet.prepareVoidlySellerRegistration();
+      if (registration.submitUrl !== `${origin}/v1/providers/register`) throw new Error('Seller registration target changed');
+      const registered = await postSeller(fetcher, registration.submitUrl, registration.body, 200);
+      const provider = registered.provider as Record<string, unknown> | undefined;
+      if (!provider || provider.status !== 'active' ||
+        typeof provider.wallet !== 'string' || provider.wallet.toLowerCase() !== wallet.address.toLowerCase() ||
+        provider.chainId !== (network === 'base' ? 8453 : 84532)) {
+        throw new Error('Seller registration was not verified');
+      }
+      const prepared = await wallet.prepareVoidlySellerListingCreate(payload);
+      if (prepared.submitUrl !== `${origin}/v1/listings`) throw new Error('Seller listing target changed');
+      createDispatched = true;
+      let created: Record<string, unknown>;
+      try { created = await postSeller(fetcher, prepared.submitUrl, prepared.body, 201); }
+      catch { throw new SellerCreationUncertainError(secretPath); }
+      const listing = created.listing as Record<string, unknown> | undefined;
+      const health = created.health as Record<string, unknown> | undefined;
+      if (!listing || !health || typeof listing.id !== 'string' || !LISTING_ID.test(listing.id) ||
+        !Number.isSafeInteger(listing.version) || Number(listing.version) < 1 ||
+        listing.status !== 'pending' || typeof listing.providerWallet !== 'string' ||
+        listing.providerWallet.toLowerCase() !== wallet.address.toLowerCase() ||
+        listing.chainId !== (network === 'base' ? 8453 : 84532) ||
+        listing.name !== payload.name || listing.description !== payload.description ||
+        listing.category !== payload.category || listing.upstreamUrl !== payload.upstreamUrl ||
+        listing.method !== payload.method || listing.priceAtomic !== payload.priceAtomic ||
+        typeof created.hmacSecretHex !== 'string' || !SECRET_HEX.test(created.hmacSecretHex) ||
+        health.method !== 'GET' || health.url !== payload.upstreamUrl ||
+        !Number.isSafeInteger(health.keyVersion) || Number(health.keyVersion) < 1) {
+        throw new SellerCreationUncertainError(secretPath);
+      }
+      createdListingId = listing.id;
+      const credential = {
+        version: 1, gateway: origin, network, sellerWallet: wallet.address,
+        listingId: listing.id, listingVersion: listing.version,
+        hmacSecretHex: created.hmacSecretHex, health,
+        createdAt: new Date().toISOString(),
+      };
+      try {
+        await secretFile.writeFile(JSON.stringify(credential));
+        await secretFile.sync();
+        await syncDirectory(dirname(secretPath));
+      }
+      catch { throw new SellerSecretPersistenceError(listing.id, secretPath); }
+      output = { command, status: 'pending_activation', network, gateway: origin,
+        listingId: listing.id, version: listing.version, sellerWallet: wallet.address,
+        secretFile: secretPath, healthUrl: health.url, healthKeyVersion: health.keyVersion,
+        next: 'Install the HMAC secret on the upstream and complete the separate listing activation health check.' };
+    } catch (error) { failure = error; }
+    try { await secretFile.close(); }
+    catch (error) {
+      if (!failure) failure = createdListingId
+        ? new SellerSecretPersistenceError(createdListingId, secretPath)
+        : createDispatched ? new SellerCreationUncertainError(secretPath) : error;
+    }
+    if (!createDispatched) await unlink(secretPath).catch(() => undefined);
+    if (failure) throw failure;
+    return output!;
+  }
+
+  const listingId = positional[0]!;
+  if (!LISTING_ID.test(listingId)) throw new Error('Invalid listing ID');
+  const version = Number(required(flags, 'version'));
+  if (!Number.isSafeInteger(version) || version < 1 || String(version) !== flags.get('version')) {
+    throw new Error('--version must be a positive integer');
+  }
+  const limits = { perCallUsd: required(flags, 'per-call-usdc'), dailyUsd: required(flags, 'daily-usdc') };
+  const limitAtomic = validateSpendLimits(limits);
+  const maxUsd = required(flags, 'max-usdc');
+  const maxAtomic = usdToAtomic(maxUsd);
+  if (maxAtomic <= 0n || maxAtomic > limitAtomic.perCall) {
+    throw new Error('--max-usdc must be positive and no higher than --per-call-usdc');
+  }
+  const body = await jsonFile(required(flags, 'input'));
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Buyer input must be a JSON object');
+  if (flags.has('dry-run')) {
+    return { command, status: 'ready', network, listingId, version,
+      detailUrl: `${origin}/v1/services/${listingId}?network=${network === 'base' ? 'eip155:8453' : 'eip155:84532'}&version=${version}`,
+      perCallUsd: limits.perCallUsd, dailyUsd: limits.dailyUsd, maxUsd,
+      effect: 'No listing fetch, wallet signing, or payment in this dry run.' };
+  }
+  const listing = await fetchMarketplaceListing(listingId, version, network, fetcher);
+  if (BigInt(listing.priceUsdcAtomic) > maxAtomic) {
+    throw new Error('Listed price exceeds your --max-usdc cap');
+  }
+  const wallet = await restore({ network, limits, stateDir, origin, mode: 'buy', fetcher });
+  if (wallet.network !== network) throw new Error('Restored wallet network differs from --network');
+  const response = await wallet.payX402({ url: listing.callUrl, method: 'POST', body,
+    maxAmountUsd: maxUsd,
+    expectedMarketplace: { listingId: listing.id, version: listing.version, payTo: listing.payTo } });
+  const verifiedStatus = response.status === 502 ? 'refund_owed' : 'delivered';
+  return { command, listingId, version, network, priceUsdcAtomic: listing.priceUsdcAtomic,
+    ...(await paidResponse(response, verifiedStatus, network)) };
+}
+
+function errorResult(error: unknown, argv: string[]): Record<string, unknown> {
+  if (error instanceof PaymentMayHaveSettledError) {
+    const index = argv.indexOf('--network');
+    const network = argv[index + 1];
+    const recoveryCommand = network === 'base' || network === 'base-sepolia'
+      ? error.quoteId
+        ? `voidly-agent-wallet recover ${error.quoteId} --network ${network}`
+        : `voidly-agent-wallet attempts --network ${network}`
+      : null;
+    return { error: error.message, ...error.toResult(), doNotRepay: true, recoveryCommand };
+  }
+  if (error instanceof SellerCreationUncertainError) {
+    return { error: error.message, code: error.code, secretFile: error.secretFile, doNotRetry: true };
+  }
+  if (error instanceof SellerSecretPersistenceError) {
+    return { error: error.message, code: error.code, listingId: error.listingId,
+      secretFile: error.secretFile, doNotRetry: true };
+  }
+  return { error: error instanceof Error ? error.message : 'Wallet CLI failed' };
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  try {
+    const result = await runWalletCli(argv);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    if (result.verifiedStatus === 'refund_owed') process.exitCode = 2;
+    else if (result.bodyComplete === false) process.exitCode = 3;
+  } catch (error) { process.stderr.write(`${JSON.stringify(errorResult(error, argv))}\n`); process.exitCode = 1; }
+}
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  void main();
+}
