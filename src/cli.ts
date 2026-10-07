@@ -5,6 +5,7 @@ import { lstat, mkdir, open, readFile, realpath, unlink, type FileHandle } from 
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { AGENT_CLI_USAGE, isAgentCliCommand, runAgentCli } from './agentCli.js';
 import { fetchMarketplaceListing } from './buyListing.js';
 import {
   AgentWallet, FileMarketplaceAttemptStore, FileSpendStore, LocalWalletBackupStore,
@@ -51,7 +52,9 @@ export class SellerSecretPersistenceError extends Error {
   }
 }
 
-const USAGE = `voidly-agent-wallet sell --network base|base-sepolia --listing listing.json [--secret-file /private/path.json] [--dry-run]
+const USAGE = `${AGENT_CLI_USAGE}
+
+voidly-agent-wallet sell --network base|base-sepolia --listing listing.json [--secret-file /private/path.json] [--dry-run]
 voidly-agent-wallet buy <listing-id> --network base|base-sepolia --version N --input input.json --per-call-usdc AMOUNT --daily-usdc AMOUNT --max-usdc AMOUNT [--dry-run]
 voidly-agent-wallet attempts --network base|base-sepolia
 voidly-agent-wallet recover <quote-id> --network base|base-sepolia
@@ -256,6 +259,7 @@ async function paidResponse(response: Response, verifiedStatus: 'delivered' | 'r
 
 /** One CLI invocation; tests inject inert wallets and transport, never real payments. */
 export async function runWalletCli(argv: string[], dependencies: WalletCliDependencies = {}): Promise<Record<string, unknown>> {
+  if (isAgentCliCommand(argv[0])) return runAgentCli(argv, dependencies);
   const { command, positional, flags } = parse(argv);
   if (command === 'help') return { usage: USAGE };
   const network = networkFlag(flags);
@@ -422,7 +426,10 @@ async function main(): Promise<void> {
   try {
     const result = await runWalletCli(argv);
     process.stdout.write(`${JSON.stringify(result)}\n`);
-    if (result.verifiedStatus === 'refund_owed') process.exitCode = 2;
+    if (isAgentCliCommand(argv[0]) && typeof result.status === 'string' &&
+        result.status !== 'ready' && result.status !== 'accepted') {
+      process.exitCode = result.status === 'outcome_unknown' ? 3 : 1;
+    } else if (result.verifiedStatus === 'refund_owed') process.exitCode = 2;
     else if (result.bodyComplete === false) process.exitCode = 3;
   } catch (error) { process.stderr.write(`${JSON.stringify(errorResult(error, argv))}\n`); process.exitCode = 1; }
 }
