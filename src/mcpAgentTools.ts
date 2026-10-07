@@ -59,7 +59,7 @@ export function registerAgentCommandTools(server: McpServer, options: AgentWalle
     }
   };
   const invokeWallet = async (argv: string[]) => {
-    if (options.allowedOrigins && !options.allowedOrigins.includes(gateway)) {
+    if (options.allowedOrigins && !options.allowedOrigins.some(origin => origin === gateway)) {
       return output({ status: 'refused', code: 'gateway_not_allowed',
         error: 'The configured wallet origin allowlist does not include this network gateway.' });
     }

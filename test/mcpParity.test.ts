@@ -330,6 +330,39 @@ test('MCP buy uses configured limits, pins listing version and payee, and keeps 
   assert.equal((await disallowed.callTool({ name: 'wallet_buy', arguments: args })).isError, true);
 });
 
+test('MCP wallet commands reject gateway prefix, suffix and path lookalikes before effects', async t => {
+  const fixture = await input({ harmless: true });
+  const missingInput = join(fixture.directory, 'missing.json');
+  let fetches = 0;
+  let signs = 0;
+  for (const lookalike of [
+    'https://prefix.x402-staging.voidly.ai',
+    `${ORIGIN}.attacker.example`,
+    `${ORIGIN}/allowed-path`,
+  ]) {
+    const client = await connect(t, {
+      commandEnv: { VOIDLY_WALLET_STATE_DIR: fixture.directory },
+      commandFetch: async () => { fetches++; assert.fail('Lookalike origin reached transport'); },
+      initialWallet: inertWallet({
+        payX402: async () => { signs++; assert.fail('Lookalike origin reached payment'); },
+        prepareVoidlySellerQuickstart: async () => { signs++; assert.fail('Lookalike origin reached signing'); },
+      }),
+    }, { ...OPTIONS, allowedOrigins: [lookalike] });
+    for (const [name, args] of [
+      ['wallet_buy', { listingId: LISTING_ID, version: 4, inputFile: missingInput, maxUsdc: '0.02', confirm: true }],
+      ['wallet_sell_quickstart', { listingFile: missingInput, confirm: true }],
+    ] as const) {
+      const { result, value } = await call(client, name, args);
+      assert.equal(result.isError, true, `${name}: ${lookalike}`);
+      assert.equal(value.status, 'refused');
+      assert.equal(value.code, 'gateway_not_allowed');
+    }
+  }
+  assert.equal(fetches, 0);
+  assert.equal(signs, 0);
+  assert.deepEqual(await readdir(fixture.directory), ['input.json']);
+});
+
 test('MCP seller uncertainty preserves a private durable intent and explicit same-intent resume', async t => {
   const file = await input({ name: 'Example answer', description: 'Returns a short answer', category: 'data',
     upstreamUrl: 'https://seller.example.test/run', method: 'POST', priceAtomic: 10_000,
