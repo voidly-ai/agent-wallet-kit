@@ -1,12 +1,12 @@
 # CLI and API setup
 
-> **PR #2 source setup.** The buy/sell CLI is open for review at 0.2.0 and is not published. Published wallet 0.1.1 provides JavaScript and local MCP interfaces, not these CLI commands. The included wrappers run the built source CLI; local dry runs establish validation only.
+> **Setup for the published 0.2.0 CLI and repository examples.** `@voidly/agent-wallet@0.2.0` includes the `voidly-agent-wallet` buy/sell executable. The included wrappers run the built source CLI; local dry runs establish validation only.
 
 ## Version and runtime
 
-The PR #2 package declares Node.js 20 or newer and the `voidly-agent-wallet` executable. In this checkout, run `npm ci && npm run build` before the example scripts. Add an npm installation command only after a real 0.2.0 release; do not relabel 0.1.1 as containing this CLI.
+The published package requires Node.js 20 or newer. Install the exact CLI release in your own project with `npm install --save-exact @voidly/agent-wallet@0.2.0`; its executable is `./node_modules/.bin/voidly-agent-wallet`. To run the repository wrappers, use this checkout and run `npm ci && npm run build` first. The wrapper scripts are not in the npm package.
 
-The command forms below are taken from candidate source. Angle-bracket values are placeholders, not executable shell input.
+The command forms below are in the released 0.2.0 client. Angle-bracket values are placeholders, not executable shell input.
 
 | Command | Required input | Effect with no `--dry-run` |
 | --- | --- | --- |
@@ -21,7 +21,7 @@ Only the underlying `buy` and `sell` commands accept `--dry-run`. They do not ac
 
 Every direct CLI invocation requires an explicit network. Start with testnet:
 
-| CLI value | Network | Candidate gateway origin |
+| CLI value | Network | Client-selected gateway origin |
 | --- | --- | --- |
 | `base-sepolia` | Base Sepolia, `eip155:84532` | `https://x402-staging.voidly.ai` |
 | `base` | Base mainnet, `eip155:8453` | `https://x402.voidly.ai` |
@@ -45,31 +45,31 @@ The health credential is separate from the wallet recovery secret. The seller co
 
 ## Buyer input and caps
 
-- Listing IDs and versions come from the selected network's actual catalog/detail response. The candidate accepts a `seller` listing with `status: "live"`, `method: "POST"`, and the exact requested version.
+- Listing IDs and versions come from the selected network's actual catalog/detail response. The CLI accepts a `seller` listing with `status: "live"`, `method: "POST"`, and the exact requested version.
 - The input must be a regular UTF-8 JSON file, at most 65,536 bytes, containing an object. Prepare it for the selected service's schema. Local dry-run does not fetch or validate the live schema.
 - All three cap flags take USDC amounts. `--max-usdc` must be positive and no greater than `--per-call-usdc`; the spend policy separately enforces the configured daily budget.
 - Keep a request's listing version, input and caps attached to its original attempt. Do not turn an uncertain result into a new purchase.
 
 ## Seller input
 
-The candidate requires `name`, `description`, `category`, `upstreamUrl`, `method`, `priceAtomic`, `inputSchema` and `outputSchema`. Its seller CLI requires `POST`. The URL must satisfy the public HTTPS restrictions; schemas use the supported constrained subset, not arbitrary JSON Schema features.
+The CLI requires `name`, `description`, `category`, `upstreamUrl`, `method`, `priceAtomic`, `inputSchema` and `outputSchema`. Its seller command requires `POST`. The URL must satisfy the public HTTPS restrictions; schemas use the supported constrained subset, not arbitrary JSON Schema features.
 
 Use `listing.example.json` for local validation, then replace its sample endpoint and review its price and schemas before any submission. The seller wrapper refuses the included template file with `--submit`; a copied listing must name your deployed upstream. Your endpoint must be your deployed service. A sample endpoint, valid JSON or successful dry-run is not evidence of health, activation or a sale.
 
 ## API contract map
 
-The table records the candidate client contract and the current public guide. It is not a set of newly tested API calls. Do not construct fresh signature bodies or HMAC handlers from this summary.
+The table records the released client contract and the current public guide. It is not a set of newly tested API calls. Do not construct fresh signature bodies or HMAC handlers from this summary.
 
 | Step | Route or source | Authentication and boundary |
 | --- | --- | --- |
 | Discover | Public `/v1/services` catalog on the selected gateway | Read descriptive listings; select an exact seller ID and version. |
-| Read exact seller | `GET /v1/services/{listing-id}?network={network-id}&version={version}` | Candidate checks the expected gateway, listing, live state, POST method, Base USDC asset and recipient. |
+| Read exact seller | `GET /v1/services/{listing-id}?network={network-id}&version={version}` | Client checks the expected gateway, listing, live state, POST method, Base USDC asset and recipient. |
 | Buy | `POST /v1/services/{listing-id}/call` | The wallet's x402 path uses the current 402 terms and its configured limits. This is the payment boundary. |
-| Request seller challenge | `POST /v1/providers/challenge` | Candidate sends wallet, action and payload, validates the returned SIWE message, then signs it locally. |
-| Register seller | `POST /v1/providers/register` | Sends the prepared payload/message/signature envelope. Candidate verifies active provider, wallet and chain. |
-| Create listing | `POST /v1/listings` | Uses a new challenge bound to that action/payload. Current candidate expects pending state and a one-time health credential. |
+| Request seller challenge | `POST /v1/providers/challenge` | Client sends wallet, action and payload, validates the returned SIWE message, then signs it locally. |
+| Register seller | `POST /v1/providers/register` | Sends the prepared payload/message/signature envelope. Client verifies active provider, wallet and chain. |
+| Create listing | `POST /v1/listings` | Uses a new challenge bound to that action/payload. Current client expects pending state and a one-time health credential. |
 | Prove health / activate | Exact health URL and `POST /v1/listings/{listing-id}/activate` in the seller guide | Not performed by the current `sell` command. Use the deployed signed-health and expected-version contract; automatic activation remains pending. |
-| Recover | Candidate `attempts` / `recover` commands | Retain the original quote and attempt. Do not substitute a new `buy`. |
+| Recover | Released `attempts` / `recover` commands | Retain the original quote and attempt. Do not substitute a new `buy`. |
 
 Do not substitute the separate direct-pay `/v1/pay/listings` API for the x402 gateway listing contract. A listing on one interface does not establish state on the other.
 
@@ -85,8 +85,8 @@ Do not substitute the separate direct-pay `/v1/pay/listings` API for the x402 ga
 | `refund_owed` | Track the owed refund; this status does not prove reimbursement. |
 | `archivePending` | Keep local state and follow up on the original attempt; do not infer that another payment is needed. |
 
-The candidate writes successful result JSON to stdout and error JSON to stderr. Exit code 1 is an error; 2 reports `refund_owed`; 3 reports incomplete response output when the result is not already `refund_owed`. A zero exit is not a statement about answer quality or seller revenue.
+The CLI writes successful result JSON to stdout and error JSON to stderr. Exit code 1 is an error; 2 reports `refund_owed`; 3 reports incomplete response output when the result is not already `refund_owed`. A zero exit is not a statement about answer quality or seller revenue.
 
-## Integration note before publication
+## Integration note
 
-Call the examples released only after the CLI is published, the seller activation contract is verified as served, and the example wrappers match it. The future capability manifest and `voidly_capabilities` MCP tool are planned discovery inputs; do not use guessed URLs or claim they are live. Keep the final path machine/API/CLI driven, with buyer-owned signing and no browser approval step.
+The CLI is published, but these repository wrappers only demonstrate local validation. Verify the selected network's served seller activation contract and the listing's public status before calling a service buyable. A capability manifest exists in source but has not been verified as served; the `voidly_capabilities` MCP tool is source-only in PR #3, outside published 0.2.0. Do not use guessed URLs or describe either discovery surface as live. Keep the final path machine/API/CLI driven, with buyer-owned signing and no browser approval step.
