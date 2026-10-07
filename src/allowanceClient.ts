@@ -82,8 +82,11 @@ export class FileSpendAllowanceStore {
     await this.append(this.path(grant.grantId,grant.payer,grant.network,'approved'),canonicalSpendAllowanceGrant(grant));
   }
   async get(id:string,wallet:string,network:string,includeDisabled=false):Promise<SpendAllowanceGrant|null>{
-    await this.root();let raw=await this.read(this.path(id,wallet,network,'approved'));
-    if(raw===null&&includeDisabled)raw=await this.read(this.path(id,wallet,network,'prepared'));
+    await this.root();
+    // Status/revoke recover the original intent even if enable() was interrupted
+    // while writing its approved marker. Purchases still require a valid approval.
+    let raw=includeDisabled?await this.read(this.path(id,wallet,network,'prepared')):null;
+    if(raw===null)raw=await this.read(this.path(id,wallet,network,'approved'));
     if(raw===null)return null;
     const grant=checkedSpendAllowanceGrant(JSON.parse(raw));
     if(grant.grantId!==id||grant.payer!==wallet||grant.network!==network)throw new Error('Allowance state identity mismatch');

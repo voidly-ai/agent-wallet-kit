@@ -480,6 +480,8 @@ export class AgentWallet {
     const asset = getDefaultAsset(config.caip).asset;
     let allowanceReservation: SpendAllowanceReservation | null = null;
     const paymentSigner: ClientEvmSigner = allowance ? { ...this.signer,
+      // Supported external signers may expose address through a prototype getter.
+      address: this.signer.address,
       signTypedData: async parameters => {
         if (!allowanceReservation) throw new Error('Allowance reservation missing before payment signing');
         const validBefore = (parameters.message as Record<string, unknown>).validBefore;
