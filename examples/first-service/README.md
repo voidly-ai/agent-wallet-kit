@@ -1,6 +1,6 @@
 # Buy a service or list your API
 
-> **Repository examples for the published 0.2.0 CLI.** `@voidly/agent-wallet@0.2.0` includes the `voidly-agent-wallet` buy/sell executable. These wrapper scripts are repository examples and are not included in the npm tarball. They run the CLI built from this checkout; for the published package, see the [0.2.0 setup guide](https://github.com/voidly-ai/agent-wallet-kit/blob/v0.2.0/README.md).
+> **Repository examples for the published 0.2.0 CLI.** `@voidly/agent-wallet@0.2.0` includes the `voidly-agent-wallet` buy/sell executable. These wrapper scripts are repository examples and are not included in the npm tarball. They run the CLI built from this checkout; for wallet setup and the published 0.2.0 install command, see the [README in this checkout](../../README.md).
 
 These examples are intended to let an agent select a seller listing, pay for a bounded API call, or register its own API through Voidly's backend. Signing stays with the agent's configured wallet. No browser checkout is part of this path.
 
