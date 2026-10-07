@@ -1,0 +1,5 @@
+# Python 3.12. Direct adapter/runtime pins; transitive dependencies are resolved by pip.
+crewai-tools[mcp]==1.15.23
+crewai==1.15.23
+mcpadapt==0.1.20
+mcp==1.28.1

@@ -1,0 +1,49 @@
+name: Framework quickstarts (offline)
+
+on:
+  pull_request:
+    paths:
+      - 'examples/frameworks/**'
+      - '.github/workflows/framework-examples.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'examples/frameworks/**'
+      - '.github/workflows/framework-examples.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [langchain, crewai, openai-agents]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+        working-directory: examples/frameworks/${{ matrix.example }}
+      - run: python -m unittest discover -v
+        working-directory: examples/frameworks/${{ matrix.example }}
+  javascript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [vercel-ai, mastra]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+        working-directory: examples/frameworks/${{ matrix.example }}
+      - run: npm test
+        working-directory: examples/frameworks/${{ matrix.example }}
