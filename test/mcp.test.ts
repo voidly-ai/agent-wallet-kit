@@ -32,14 +32,20 @@ test('keyless MCP server exposes wallet tools and refuses address before local c
   const client = new Client({ name: 'wallet-source-test', version: '0.1.0' });
   try {
     await client.connect(transport);
+    assert.equal(client.getServerVersion()?.version, '0.5.0');
     const result = await client.listTools();
     const names = result.tools.map(tool => tool.name).sort();
     assert.deepEqual(names, [
+      'voidly_board_award', 'voidly_board_bid', 'voidly_board_post',
+      'voidly_bounty_claim', 'voidly_bounty_list', 'voidly_bounty_show', 'voidly_bounty_submit',
       'voidly_capabilities',
+      'voidly_home', 'voidly_job_create', 'voidly_job_show', 'voidly_jobs',
+      'voidly_mail_inbox', 'voidly_mail_read', 'voidly_mail_send', 'voidly_mail_status',
       'wallet_address', 'wallet_backup_relay', 'wallet_balance', 'wallet_create',
       'wallet_funding_request', 'wallet_generate_recovery_secret', 'wallet_marketplace_attempts', 'wallet_pay_x402', 'wallet_prepare_voidly_seller_registration', 'wallet_receive_info',
       'wallet_recover_marketplace', 'wallet_restore_local', 'wallet_restore_relay',
-    ]);
+      'wallet_buy', 'wallet_sell_quickstart',
+    ].sort());
     const address = await client.callTool({ name: 'wallet_address', arguments: {} });
     assert.equal(address.isError, true);
     assert.match(JSON.stringify(address.content), /Create or restore a wallet first/);
