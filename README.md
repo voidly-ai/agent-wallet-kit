@@ -1,8 +1,8 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents, with an ESM library, a local stdio MCP server, and the `voidly-agent-wallet` CLI. Version 0.5.1 includes a guided buy/sell quickstart, seller onboarding, capped Marketplace purchases and recovery, Home, Board, Jobs, bounty intake, hosted Voidmail commands, and capabilities. Node.js 20 or newer is required. The 0.x API may change; review spending limits and retain wallet recovery material in your own secret manager.
+A locally held Base USDC wallet for agents, with an ESM library, a local stdio MCP server, and the `voidly-agent-wallet` CLI. Version 0.6.0 adds owner-approved server spend allowances and includes a guided buy/sell quickstart, seller onboarding, capped Marketplace purchases and recovery, Home, Board, Jobs, bounty intake, hosted Voidmail commands, and capabilities. Node.js 20 or newer is required. The 0.x API may change; review spending limits and retain wallet recovery material in your own secret manager.
 
-This README describes the 0.5.1 source and package contents. Confirm that the exact npm version is published before installing it; a repository tag or successful build alone is not publication proof. The local wallet Registry entry (`io.github.voidly-ai/agent-wallet-kit`, stdio) is distinct from the hosted server (`io.github.voidly-ai/voidly-hosted`, `https://api.voidly.ai/mcp`, Streamable HTTP). Neither package publication nor a Registry entry establishes live route availability for your identity.
+This README describes the 0.6.0 source and package contents. Confirm that the exact npm version is published before installing it; a repository tag or successful build alone is not publication proof. The local wallet Registry entry (`io.github.voidly-ai/agent-wallet-kit`, stdio) is distinct from the hosted server (`io.github.voidly-ai/voidly-hosted`, `https://api.voidly.ai/mcp`, Streamable HTTP). Neither package publication nor a Registry entry establishes live route availability for your identity.
 
 ## Guided quickstart
 
@@ -215,10 +215,10 @@ Save the operation ID before sending. `accepted` means the mail provider accepte
 
 ## Run the MCP server
 
-After confirming the 0.5.1 npm version is available, install it exactly in your agent project:
+After confirming the 0.6.0 npm version is available, install it exactly in your agent project:
 
 ```sh
-npm install --save-exact @voidly/agent-wallet@0.5.1
+npm install --save-exact @voidly/agent-wallet@0.6.0
 VOIDLY_WALLET_NETWORK=base-sepolia \
 VOIDLY_WALLET_PER_CALL_USDC=0.02 \
 VOIDLY_WALLET_DAILY_USDC=0.05 \
@@ -240,7 +240,7 @@ Configure your MCP host to run the installed binary or source command over stdio
 
 ## Install in Claude Code or Cursor
 
-After confirming npm publication, these examples run the local stdio server from `@voidly/agent-wallet@0.5.1`. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required. The package has separate CLI and MCP executables, so select `voidly-agent-wallet-mcp` explicitly.
+After confirming npm publication, these examples run the local stdio server from `@voidly/agent-wallet@0.6.0`. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required. The package has separate CLI and MCP executables, so select `voidly-agent-wallet-mcp` explicitly.
 
 In the Claude Code project that needs the wallet, add it with local scope:
 
@@ -249,7 +249,7 @@ claude mcp add \
   --env VOIDLY_WALLET_NETWORK=base-sepolia \
   --env VOIDLY_WALLET_PER_CALL_USDC=0.02 \
   --env VOIDLY_WALLET_DAILY_USDC=0.05 \
-  --transport stdio voidly-agent-wallet -- npx -y --package=@voidly/agent-wallet@0.5.1 voidly-agent-wallet-mcp
+  --transport stdio voidly-agent-wallet -- npx -y --package=@voidly/agent-wallet@0.6.0 voidly-agent-wallet-mcp
 ```
 
 For Cursor, create `.cursor/mcp.json` in the project:
@@ -260,7 +260,7 @@ For Cursor, create `.cursor/mcp.json` in the project:
     "voidly-agent-wallet": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "--package=@voidly/agent-wallet@0.5.1", "voidly-agent-wallet-mcp"],
+      "args": ["-y", "--package=@voidly/agent-wallet@0.6.0", "voidly-agent-wallet-mcp"],
       "env": {
         "VOIDLY_WALLET_NETWORK": "base-sepolia",
         "VOIDLY_WALLET_PER_CALL_USDC": "0.02",
@@ -356,3 +356,25 @@ After a signed retry, `paymentMayHaveSettled: true` means **do not pay again**. 
 With `fromSigner`, seller registration and Marketplace recovery also require an EIP-191 `signMessage` method.
 
 The built-in create and restore paths hold the plaintext key locally; optional Relay backup sends a client-encrypted wallet-key envelope. Relay can associate the backup with its wallet address and authenticated agent account; this path does not send the plaintext wallet key or recovery secret. `fromSigner` uses a caller-supplied signer, whose custody depends on its implementation. Spend caps govern calls made through this wallet only. Seller signing is limited to fixed registration, listing creation and quickstart mutations. Configure upstream health before relying on the gateway to report the listing live; command success alone is not activation proof.
+
+
+## Owner-approved spend allowances (0.6.0 source)
+
+The separate `wallet_allowance_buy` MCP tool can buy without a new per-call approval **only after the host obtains the owner's explicit approval of an exact grant** through `wallet_allowance_grant` with `confirm: true`. Existing `wallet_buy`, `wallet_pay_x402`, sell, bounty, mail and other tools keep their existing approval rules. The new gateway routes require migration `0031` and the corresponding gateway patch; until they are deployed, allowance tools fail closed. Source, npm publication, local stdio Registry registration, hosted Registry registration and runtime availability are separate evidence.
+
+| Tool | Authority and effect |
+| --- | --- |
+| `wallet_allowance_grant` | `confirm: true` after owner approval; sign and register one immutable grant, then durably enable it locally after matching server readback. |
+| `wallet_allowance_status` | Signed private read of the retained grant and remaining admission budget. |
+| `wallet_allowance_revoke` | `confirm: true`; disable local use first, then revoke on the server. A network failure does not re-enable local use; reconcile the same grant. |
+| `wallet_allowance_buy` | Requires the durable local approval marker and an identical active server grant. Buys one allowed listing version/payee within both server and local caps. |
+
+A grant pins the payer/owner wallet (the same EOA in this MVP), gateway, Base network, Circle USDC, grant ID, valid-after and expiry, daily/per-call atomic USDC caps, and 1–32 exact listing/version/payee triples. Limits are at most 100 USDC daily, 10 USDC per purchase and 30 days. No wildcard sellers or negotiated/deferred job payments. Amounts are decimal atomic-unit strings (1 USDC = 1,000,000 atomic units); grant timestamps are Unix seconds. `confirm: true` is the host's acknowledgement, not independent human authentication. The signing key stays local; the gateway does not receive custody, a token approval or payment-signing authority.
+
+Before signing a purchase, the wallet obtains an authenticated server reservation for the original quote, verifies all quote fields against the grant, and checks the payment authorization window. The gateway atomically admits reservations under the grant cap and binds one original payment key before settlement. A database trigger prevents a reserved quote from bypassing its grant by stripping the allowance header or racing revocation. The 60-second payment authorization must fit before quote expiry, grant expiry and the UTC day boundary; short windows fail closed.
+
+The budget counts **admitted authorization exposure**, not just delivered services: today's reservations remain charged, and earlier bound/unknown outcomes carry forward until a server-verified terminal receipt reconciles them. Expired, failed or unknown requests do not automatically refund allowance budget. A `202`, `503`, lost response or receipt failure preserves the existing original quote/payment/wallet/network recovery path. Never buy again to recover, generate a replacement payment key, or automatically resume. Use `wallet_marketplace_attempts` / `wallet_recover_marketplace` for the original attempt.
+
+`SPEND_ALLOWANCE_KILL=1` blocks new grants and delegated admissions. Existing gateway payment/mainnet gates and local daily/per-call caps also apply. Private status and revocation remain available during payment kills. Revocation stops future admission; it cannot recall an authorization already admitted or submitted. Grants are gateway-local budgets for this delegated purchase path, not an on-chain restriction on an EOA or a limit on separately approved payments made elsewhere. B1101 starter-payout funds and authority are unrelated.
+
+The local state directory retains private pending grant records, approval files and permanent revoke tombstones. A lost registration response leaves a disabled pending record so status/revoke can reconcile the same grant without enabling purchases. Restoring a wallet without its approval state does not silently restore delegated authority; explicit approval is needed again. New grant IDs are required after revocation. Library callers use `spendAllowanceRequest` and `payX402({ spendAllowance: grant, ... })` and are responsible for the same explicit owner approval and durable local enablement policy as the MCP host.

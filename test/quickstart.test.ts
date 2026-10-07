@@ -28,7 +28,7 @@ test('quickstart is an offline Sepolia guide with both workflows and explicit ho
   assert.equal(result.schema, 'voidly-wallet-quickstart/v1');
   assert.equal(result.command, 'quickstart');
   assert.equal(result.mode, 'guide_only');
-  assert.equal(result.package.version, '0.5.1');
+  assert.equal(result.package.version, '0.6.0');
   assert.equal(result.network, 'base-sepolia');
   assert.equal(result.gateway, 'https://x402-staging.voidly.ai');
   assert.equal(Object.values(result.effects).every(value => value === false), true);
