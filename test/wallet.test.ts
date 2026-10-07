@@ -204,7 +204,8 @@ test(`Marketplace attempt is durable before paid retry and recovers from ${origi
       network: 'base-sepolia', limits: { perCallUsd: '0.02', dailyUsd: '0.03' },
       spendStore, marketplaceAttemptStore: attemptStore, fetcher,
     });
-    const paid = await wallet.payX402({ url: callUrl, method: 'POST', body });
+    const paid = await wallet.payX402({ url: callUrl, method: 'POST', body,
+      expectedMarketplace: { listingId, version: 4, payTo: PAYEE } });
     assert.equal(paid.status, 200);
     assert.deepEqual({ paidFetches, signs }, { paidFetches: 2, signs: 1 });
     const saved = (await wallet.marketplaceAttempts()).find(item => item.quoteId === quoteId)!;
@@ -327,6 +328,45 @@ test('Marketplace rejects malformed wrapped intent and unknown gateway before si
     allowedOrigins: ['https://x402-staging.voidly.ai'] })
     .payX402({ url: callUrl, method: 'POST', body }), /staging requires Base Sepolia/);
   assert.equal(signs, 0);
+});
+
+test('Marketplace CLI listing pin rejects changed version or seller before signing', async () => {
+  const listingId = 'echo1234';
+  const callUrl = `https://x402-staging.voidly.ai/v1/services/${listingId}/call`;
+  const quoteId = `0x${'a'.repeat(64)}`;
+  const quoteUrl = `${callUrl}?quote=${quoteId}`;
+  const body = { prompt: 'echo' };
+  const required = challenge('10000', quoteUrl);
+  required.accepts[0]!.extra = { ...required.accepts[0]!.extra,
+    assetTransferMethod: 'eip3009', paymentFlow: 'upfront' };
+  required.extensions = { 'voidpay.intent': {
+    version: 1, listingId, listingVersion: 4, quoteId, resource: quoteUrl,
+    inputDigest: digest(JSON.stringify(body)), sellerWallet: PAYEE, amountAtomic: '10000',
+  } };
+  let fetches = 0;
+  let signs = 0;
+  const wallet = AgentWallet.fromSigner({ address: PAYER,
+    async signTypedData() { signs++; return `0x${'11'.repeat(64)}1b` as `0x${string}`; },
+  }, {
+    network: 'base-sepolia', limits: { perCallUsd: '0.02', dailyUsd: '0.03' },
+    spendStore: new MemorySpendStore(), marketplaceAttemptStore: new MemoryMarketplaceAttemptStore(),
+    unsafeAllowVolatileSpendStoreForTests: true,
+    fetcher: async () => { fetches++;
+      return new Response('{}', { status: 402,
+        headers: { 'payment-required': encodePaymentRequiredHeader(required) } }); },
+  });
+  for (const expectedMarketplace of [
+    { listingId, version: 5, payTo: PAYEE },
+    { listingId, version: 4, payTo: '0x3333333333333333333333333333333333333333' as const },
+  ]) {
+    await assert.rejects(wallet.payX402({ url: callUrl, method: 'POST', body,
+      expectedMarketplace }), /selected listing version or seller/);
+  }
+  assert.deepEqual({ fetches, signs }, { fetches: 2, signs: 0 });
+  await assert.rejects(wallet.payX402({ url: callUrl, method: 'POST', body,
+    expectedMarketplace: { listingId: 'different', version: 4, payTo: PAYEE } }),
+  /Invalid expected Marketplace listing/);
+  assert.equal(fetches, 2);
 });
 
 test('per-call cap and quote/asset mismatch refuse before inert signer runs', async () => {
