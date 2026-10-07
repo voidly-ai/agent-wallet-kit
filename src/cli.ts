@@ -362,6 +362,17 @@ function checkedQuickstartIntent(value: Record<string, unknown>, network: BaseNe
   return value as QuickstartIntent;
 }
 
+function validPendingQuickstartHealth(listing: Record<string, unknown>): boolean {
+  const unchecked = listing.healthState === 'unchecked' &&
+    listing.healthCheckedAt === null && listing.healthFailureCode === null;
+  const failedProbe = listing.healthState === 'failed' &&
+    typeof listing.healthCheckedAt === 'number' && Number.isSafeInteger(listing.healthCheckedAt) &&
+    listing.healthCheckedAt >= 0 && listing.updatedAt === listing.healthCheckedAt &&
+    typeof listing.healthFailureCode === 'string' &&
+    listing.healthFailureCode.length > 0;
+  return unchecked || failedProbe;
+}
+
 function checkedQuickstartResult(value: Record<string, unknown>, listingInput: VoidlySellerListingInput,
   walletAddress: string, network: BaseNetwork): { listingId: string; version: number; keyVersion: number } {
   const provider = value.provider;
@@ -373,8 +384,7 @@ function checkedQuickstartResult(value: Record<string, unknown>, listingInput: V
       provider.status !== 'active' || provider.chainId !== chainId ||
       typeof provider.wallet !== 'string' || provider.wallet.toLowerCase() !== walletAddress.toLowerCase() ||
       typeof listing.id !== 'string' || !LISTING_ID.test(listing.id) ||
-      listing.version !== 1 || listing.status !== 'pending' || listing.healthState !== 'unchecked' ||
-      listing.healthCheckedAt !== null || listing.healthFailureCode !== null ||
+      listing.version !== 1 || listing.status !== 'pending' || !validPendingQuickstartHealth(listing) ||
       listing.chainId !== chainId || typeof listing.providerWallet !== 'string' ||
       listing.providerWallet.toLowerCase() !== walletAddress.toLowerCase() ||
       listing.name !== listingInput.name || listing.description !== listingInput.description ||
