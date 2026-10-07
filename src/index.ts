@@ -23,16 +23,19 @@ import { checkedMarketplaceOrigin, MARKETPLACE_ORIGINS, type MarketplaceAttempt,
 import { verifyMarketplaceOutcome } from './marketplaceReceiptVerification.js';
 import { prepareVoidlySellerRegistration as prepareSellerRegistration,
   prepareVoidlySellerListingCreate as prepareSellerListingCreate,
+  prepareVoidlySellerQuickstart as prepareSellerQuickstart,
   validateVoidlySellerListingInput,
   type PreparedVoidlySellerRegistration, type PreparedVoidlySellerListingCreate,
-  type VoidlySellerListingInput } from './sellerRegistration.js';
+  type PreparedVoidlySellerQuickstart, type VoidlySellerListingInput,
+  type VoidlySellerQuickstartInput } from './sellerRegistration.js';
 
 export * from './backup.js';
 export * from './spend.js';
 export * from './marketplaceRecovery.js';
 export * from './marketplaceReceiptVerification.js';
 export type { PreparedVoidlySellerRegistration, PreparedVoidlySellerListingCreate,
-  VoidlySellerListingInput } from './sellerRegistration.js';
+  PreparedVoidlySellerQuickstart, VoidlySellerListingInput,
+  VoidlySellerQuickstartInput } from './sellerRegistration.js';
 export { validateVoidlySellerListingInput };
 
 export interface AgentWalletOptions {
@@ -305,6 +308,18 @@ export class AgentWallet {
   /** Sign only a validated, one-use Voidly listing-create challenge. Never submits it. */
   async prepareVoidlySellerListingCreate(payload: VoidlySellerListingInput): Promise<PreparedVoidlySellerListingCreate> {
     return prepareSellerListingCreate({
+      network: this.network,
+      address: this.address,
+      allowedOrigins: this.options.allowedOrigins ?? [],
+      signer: this.signer,
+      fetcher: this.options.fetcher ?? fetch,
+      payload,
+    });
+  }
+
+  /** Sign only the fixed quickstart mutation. A caller must retain the idempotency payload before submitting it. */
+  async prepareVoidlySellerQuickstart(payload: VoidlySellerQuickstartInput): Promise<PreparedVoidlySellerQuickstart> {
+    return prepareSellerQuickstart({
       network: this.network,
       address: this.address,
       allowedOrigins: this.options.allowedOrigins ?? [],

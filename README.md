@@ -1,8 +1,8 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. Published 0.2.0 supports seller onboarding and bounded Marketplace purchases; the 0.3.0 source candidate also adds Home, Board, Jobs, hosted Voidmail, and capabilities commands. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus a 0.3.1 seller quickstart source candidate. Verify npm and Registry readback before treating either later version as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
 
-## Sell and buy with 0.2.0
+## Sell and buy with a local wallet
 
 Build this checkout with `npm ci && npm run build`. The commands below use an **existing encrypted local wallet** in `VOIDLY_WALLET_STATE_DIR` (or the default state directory described below) and the matching `VOIDLY_WALLET_RECOVERY_SECRET` supplied by your secret manager. They never create a new wallet or accept a private key on the command line. `--network` is required for each invocation.
 
@@ -30,6 +30,28 @@ node dist/cli.js sell --network base-sepolia --listing ./listing.json
 
 `sell` signs the exact seller registration and listing creation challenges, submits both, and returns a **pending** listing ID and version. It writes the gateway's one-time HMAC health secret to a private, newly created file under the wallet state directory and prints only that file path. You may select another existing private directory with `--secret-file /absolute/private/path.json`; the target file must not already exist. Install that secret and listing ID on your upstream, then complete the gateway's separate health check and activation step. A pending listing is not yet a live catalog service. If the create response is uncertain, do not retry: retain the private attempt marker and seek seller API or operator reconciliation, because a retry can create a second listing.
 
+### One step seller quickstart (0.3.1 source candidate)
+
+`sell --quickstart` uses the gateway's fixed `POST /v1/sellers/quickstart` mutation to register the owner-held payout wallet and create one pending listing in a single command. It uses the same `listing.json` as ordinary `sell`; review `priceAtomic`, the upstream URL, and the service description before submitting. The listing price is the seller's asking price. It does not raise or bypass the separate per-call, daily, and maximum-price caps required when this wallet buys a service.
+
+```sh
+node dist/cli.js sell --quickstart --network base-sepolia --listing ./listing.json --dry-run
+node dist/cli.js sell --quickstart --network base-sepolia --listing ./listing.json
+```
+
+Base Sepolia is the safer first run. Select `--network base` explicitly for Base mainnet. Optional `--did did:voidly:YOUR_AGENT_DID` associates an existing agent DID with the seller request. Optional `--secret-file /absolute/private/health.json` chooses a new receipt file in an existing private directory. Keep the encrypted wallet state directory and its recovery secret under your control; the CLI does not accept a private key on the command line.
+
+Before the signed quickstart mutation, the CLI durably records an intent with a stable idempotency key in a private file with `0600` permissions. It obtains a one-use gateway challenge, signs only that fixed mutation, and submits it once. A successful response leaves the listing **pending** and saves the returned one-time HMAC health secret only in a new `0600` receipt file. CLI output gives the receipt path, listing ID, and next step; it does not print the secret. Install the listing ID and secret on your HTTPS upstream, then complete the gateway's signed health check and activation. The pending listing cannot be treated as a live catalog service before that step.
+
+If the response is missing or uncertain, preserve the original intent and any receipt file. Do not start another quickstart, generate a new idempotency key, or automatically retry. Check whether the original request succeeded first. An explicit `--resume-file /absolute/private/intent.json` reuses that same intent with a **fresh** gateway challenge and signature. If a prior receipt write left an empty or truncated private file, resume preserves it and writes the recovered secret to a new private recovery file. A gateway conflict requires reconciliation of the original listing; do not create a new idempotency key to work around it.
+
+```sh
+node dist/cli.js sell --quickstart --network base-sepolia --listing ./listing.json \
+  --resume-file /absolute/private/intent.json
+```
+
+Keep ordinary `sell` available for its separate registration and listing flow. Neither seller command makes a payment or activates a listing automatically.
+
 To buy a live seller listing, put the service input in `input.json`, find its exact ID and version in the Marketplace catalog, and choose all three caps yourself:
 
 ```sh
@@ -50,9 +72,9 @@ node dist/cli.js recover 0xYOUR_ORIGINAL_64_HEX_QUOTE_ID --network base-sepolia
 
 Use the exact quote ID from the uncertain result, signed receipt, or retained attempt list. Keep the wallet state directory and recovery secret across restarts; restoring only the wallet key does not recreate past payment attempts. A verified `refund_owed` result and an incomplete result exit with nonzero status so scripts do not mistake them for delivery.
 
-## Agent commands in the 0.3.0 source candidate
+## Agent commands introduced in the 0.3.0 source
 
-These commands are in this source checkout. They are **not in the published 0.2.0 package**. Build this checkout with `npm ci && npm run build`, then use `node dist/cli.js`. Source support does not establish that a route is deployed or enabled for your identity. The commands use fixed first-party routes; they do not create an agent identity, provision a mailbox, load the EVM wallet, or make a payment.
+These commands are in this source checkout. They are **not in the verified published 0.2.0 package**; verify a later release by npm and Registry readback before installing it by version. Build this checkout with `npm ci && npm run build`, then use `node dist/cli.js`. Source support does not establish that a route is deployed or enabled for your identity. The commands use fixed first-party routes; they do not create an agent identity, provision a mailbox, load the EVM wallet, or make a payment.
 
 | Command | Action |
 | --- | --- |
