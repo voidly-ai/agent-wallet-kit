@@ -32,7 +32,7 @@ test('keyless MCP server exposes wallet tools and refuses address before local c
   const client = new Client({ name: 'wallet-source-test', version: '0.1.0' });
   try {
     await client.connect(transport);
-    assert.equal(client.getServerVersion()?.version, '0.5.0');
+    assert.equal(client.getServerVersion()?.version, '0.5.1');
     const result = await client.listTools();
     const names = result.tools.map(tool => tool.name).sort();
     assert.deepEqual(names, [
