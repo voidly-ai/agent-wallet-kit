@@ -35,6 +35,7 @@ test('keyless MCP server exposes wallet tools and refuses address before local c
     const result = await client.listTools();
     const names = result.tools.map(tool => tool.name).sort();
     assert.deepEqual(names, [
+      'voidly_capabilities',
       'wallet_address', 'wallet_backup_relay', 'wallet_balance', 'wallet_create',
       'wallet_funding_request', 'wallet_generate_recovery_secret', 'wallet_marketplace_attempts', 'wallet_pay_x402', 'wallet_prepare_voidly_seller_registration', 'wallet_receive_info',
       'wallet_recover_marketplace', 'wallet_restore_local', 'wallet_restore_relay',

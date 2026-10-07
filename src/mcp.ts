@@ -8,6 +8,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { AgentWallet, PaymentMayHaveSettledError, RelayWalletBackupStore, LocalWalletBackupStore, FileSpendStore, FileMarketplaceAttemptStore, generateRecoverySecret, isGeneratedRecoverySecret, type AgentWalletOptions, type BaseNetwork, type WalletBackupStore } from './index.js';
+import { readVoidlyCapabilities } from './voidlyCapabilities.js';
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const fail = (error: unknown) => ({
@@ -123,6 +124,8 @@ async function boundedResponse(response: Response, deadlineMs = 15_000): Promise
 }
 
 export interface WalletMcpDependencies {
+  /** Source-test seam for the read-only canonical capability manifest. */
+  capabilitiesFetch?: typeof fetch;
   /** Source-test seam. Runtime uses local cryptographic key generation. */
   createWallet?: () => AgentWallet;
   /** Source-test seam for inert signer tests; never supplied by the runtime. */
@@ -172,6 +175,14 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
     return secret;
   };
   const memoryOnly = dependencies.memoryOnly ?? process.env.VOIDLY_WALLET_MEMORY_ONLY === '1';
+
+  server.registerTool('voidly_capabilities', {
+    description: 'Read Voidly\'s public capability manifest in one call, including each listed endpoint, related endpoints, availability, and coverage. No wallet is needed; listed routes are not live-service proof.',
+    inputSchema: z.object({}).strict(),
+  }, async () => {
+    try { return text(await readVoidlyCapabilities(dependencies.capabilitiesFetch ?? fetch)); }
+    catch (error) { return fail(error); }
+  });
 
   server.registerTool('wallet_generate_recovery_secret', {
     description: 'Generate a one-time 32-byte recovery secret. Store it in the agent secret manager before creating a wallet; it is never sent to Voidly.',

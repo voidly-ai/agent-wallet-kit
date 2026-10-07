@@ -2,7 +2,7 @@
 
 A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI for seller onboarding and bounded Marketplace purchases. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
 
-## Sell and buy from the 0.2.0 source candidate
+## Sell and buy with 0.2.0
 
 Build this checkout with `npm ci && npm run build`. The commands below use an **existing encrypted local wallet** in `VOIDLY_WALLET_STATE_DIR` (or the default state directory described below) and the matching `VOIDLY_WALLET_RECOVERY_SECRET` supplied by your secret manager. They never create a new wallet or accept a private key on the command line. `--network` is required for each invocation.
 
@@ -52,10 +52,10 @@ Use the exact quote ID from the uncertain result, signed receipt, or retained at
 
 ## Run the MCP server
 
-For the pinned 0.1.1 MCP release, install the exact package version in your agent project:
+For the published 0.2.0 MCP release, install the exact package version in your agent project:
 
 ```sh
-npm install --save-exact @voidly/agent-wallet@0.1.1
+npm install --save-exact @voidly/agent-wallet@0.2.0
 VOIDLY_WALLET_NETWORK=base-sepolia \
 VOIDLY_WALLET_PER_CALL_USDC=0.02 \
 VOIDLY_WALLET_DAILY_USDC=0.05 \
@@ -77,7 +77,7 @@ Configure your MCP host to run the installed binary or source command over stdio
 
 ## Install in Claude Code or Cursor
 
-These examples run the local stdio server from `@voidly/agent-wallet@0.1.1` once that version is published. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required.
+These examples run the published local stdio server from `@voidly/agent-wallet@0.2.0`. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required. The package has separate CLI and MCP executables, so select `voidly-agent-wallet-mcp` explicitly.
 
 In the Claude Code project that needs the wallet, add it with local scope:
 
@@ -86,7 +86,7 @@ claude mcp add \
   --env VOIDLY_WALLET_NETWORK=base-sepolia \
   --env VOIDLY_WALLET_PER_CALL_USDC=0.02 \
   --env VOIDLY_WALLET_DAILY_USDC=0.05 \
-  --transport stdio voidly-agent-wallet -- npx -y @voidly/agent-wallet@0.1.1
+  --transport stdio voidly-agent-wallet -- npx -y --package=@voidly/agent-wallet@0.2.0 voidly-agent-wallet-mcp
 ```
 
 For Cursor, create `.cursor/mcp.json` in the project:
@@ -97,7 +97,7 @@ For Cursor, create `.cursor/mcp.json` in the project:
     "voidly-agent-wallet": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@voidly/agent-wallet@0.1.1"],
+      "args": ["-y", "--package=@voidly/agent-wallet@0.2.0", "voidly-agent-wallet-mcp"],
       "env": {
         "VOIDLY_WALLET_NETWORK": "base-sepolia",
         "VOIDLY_WALLET_PER_CALL_USDC": "0.02",
@@ -114,6 +114,7 @@ By default, local state uses `$XDG_STATE_HOME/voidly-agent-wallet` when `XDG_STA
 
 | Tool | Input | Result |
 | --- | --- | --- |
+| `voidly_capabilities` | `{}` | **B505 source only; not in published 0.2.0.** One read-only call returns the public capability manifest's listed actions, endpoints, related endpoints, availability and coverage. No wallet is needed. |
 | `wallet_generate_recovery_secret` | `{}` | One random 32-byte secret. Treat the MCP result as sensitive and save it in your own secret manager before wallet creation. |
 | `wallet_create` | `{}` | Create a wallet and store its encrypted backup before returning its address. |
 | `wallet_restore_local` | `{}` | Restore the local encrypted backup using `VOIDLY_WALLET_RECOVERY_SECRET`. |
@@ -127,6 +128,8 @@ By default, local state uses `$XDG_STATE_HOME/voidly-agent-wallet` when `XDG_STA
 | `wallet_marketplace_attempts` | `{}` | Retained quote and payment coordinates for this wallet. |
 | `wallet_recover_marketplace` | `{quoteId}` | Fresh payer-authenticated result GET for the original Marketplace payment; no second payment. |
 | `wallet_backup_relay` | `{}` | Save another encrypted backup in Relay memory; returns its backup key. |
+
+The B505 source tool reads only `https://voidly.ai/.well-known/voidly.json`. It returns an error while that manifest is unavailable. The manifest's `coverage` and each action's availability remain explicit: a partial catalog or source-wired endpoint does not prove a live route. The tool lists routes; it does not invoke them, load a wallet, sign, or pay.
 
 `wallet_create` needs a generated recovery secret. Use `wallet_generate_recovery_secret` in a fresh process, save the value outside Voidly and this repository, then create the wallet in that process. On restart, supply the saved value as `VOIDLY_WALLET_RECOVERY_SECRET` to restore or make another backup. Losing the secret makes the encrypted backup unusable. This tool returns the secret through your MCP host, which may log the result. Protect host logs and never include the secret in a prompt or payment request.
 
