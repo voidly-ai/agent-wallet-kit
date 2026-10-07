@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { AGENT_CLI_USAGE, isAgentCliCommand, runAgentCli } from './agentCli.js';
 import { fetchMarketplaceListing } from './buyListing.js';
+import { walletQuickstartGuide } from './quickstart.js';
 import {
   AgentWallet, FileMarketplaceAttemptStore, FileSpendStore, LocalWalletBackupStore,
   PaymentMayHaveSettledError, usdToAtomic, validateSpendLimits,
@@ -96,6 +97,8 @@ export class SellerQuickstartExistingIntentError extends Error {
 
 const USAGE = `${AGENT_CLI_USAGE}
 
+voidly-agent-wallet quickstart [--network base|base-sepolia]
+
 voidly-agent-wallet sell --network base|base-sepolia --listing listing.json [--secret-file /private/path.json] [--dry-run]
 voidly-agent-wallet sell --quickstart --network base|base-sepolia --listing listing.json [--did DID] [--secret-file /private/path.json] [--dry-run]
 voidly-agent-wallet sell --quickstart --network base|base-sepolia --listing listing.json --resume-file /private/intent.json
@@ -103,16 +106,17 @@ voidly-agent-wallet buy <listing-id> --network base|base-sepolia --version N --i
 voidly-agent-wallet attempts --network base|base-sepolia
 voidly-agent-wallet recover <quote-id> --network base|base-sepolia
 
-Both commands restore an existing encrypted local wallet with VOIDLY_WALLET_RECOVERY_SECRET.
-sell registers the payout wallet and creates a pending listing. --quickstart performs one signed gateway mutation with a durable idempotency intent. Both leave activation separate; health secrets are written only to private files.
+quickstart prints an offline buy/sell guide (Base Sepolia by default); it never reads wallet state, signs or executes a command.
+Buy and sell restore an existing encrypted local wallet with VOIDLY_WALLET_RECOVERY_SECRET.
+sell registers the payout wallet and creates a pending listing. --quickstart performs one signed gateway mutation with a durable idempotency intent. The wallet does not send a separate activation request; verify gateway health and live state. Health secrets are written only to private files.
 buy makes one bounded x402 call. An uncertain paid retry must be recovered with the original quote ID; never run buy again for that attempt.`;
 
-function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recover' | 'help'; positional: string[]; flags: Map<string, string> } {
+function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recover' | 'quickstart' | 'help'; positional: string[]; flags: Map<string, string> } {
   if (argv.length === 0 || argv[0] === 'help' || argv[0] === '--help') {
     return { command: 'help', positional: [], flags: new Map() };
   }
   const command = argv[0];
-  if (command !== 'sell' && command !== 'buy' && command !== 'attempts' && command !== 'recover') throw new Error(USAGE);
+  if (command !== 'sell' && command !== 'buy' && command !== 'attempts' && command !== 'recover' && command !== 'quickstart') throw new Error(USAGE);
   const flags = new Map<string, string>();
   const positional: string[] = [];
   const allowed = command === 'sell'
@@ -131,7 +135,7 @@ function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recove
     flags.set(key, value);
   }
   if (command === 'sell' && positional.length !== 0 || command === 'buy' && positional.length !== 1 ||
-    command === 'attempts' && positional.length !== 0 || command === 'recover' && positional.length !== 1) {
+    (command === 'attempts' || command === 'quickstart') && positional.length !== 0 || command === 'recover' && positional.length !== 1) {
     throw new Error(USAGE);
   }
   if (command === 'sell' && (!flags.has('quickstart') && (flags.has('resume-file') || flags.has('did')) ||
@@ -566,6 +570,10 @@ export async function runWalletCli(argv: string[], dependencies: WalletCliDepend
   if (isAgentCliCommand(argv[0])) return runAgentCli(argv, dependencies);
   const { command, positional, flags } = parse(argv);
   if (command === 'help') return { usage: USAGE };
+  if (command === 'quickstart') {
+    const network = flags.has('network') ? networkFlag(flags) : 'base-sepolia';
+    return walletQuickstartGuide(network);
+  }
   const network = networkFlag(flags);
   const origin = ORIGINS[network];
   const env = dependencies.env ?? process.env;

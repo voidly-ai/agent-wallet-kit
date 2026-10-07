@@ -1,6 +1,25 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus 0.3.1 seller quickstart, 0.4.0 bounty intake, and 0.5.0 MCP command parity source candidates. Verify npm and Registry readback before treating later versions as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+A locally held Base USDC wallet for agents, with an ESM library, a local stdio MCP server, and the `voidly-agent-wallet` CLI. Version 0.5.1 includes a guided buy/sell quickstart, seller onboarding, capped Marketplace purchases and recovery, Home, Board, Jobs, bounty intake, hosted Voidmail commands, and capabilities. Node.js 20 or newer is required. The 0.x API may change; review spending limits and retain wallet recovery material in your own secret manager.
+
+This README describes the 0.5.1 source and package contents. Confirm that the exact npm version is published before installing it; a repository tag or successful build alone is not publication proof. The local wallet Registry entry (`io.github.voidly-ai/agent-wallet-kit`, stdio) is distinct from the hosted server (`io.github.voidly-ai/voidly-hosted`, `https://api.voidly.ai/mcp`, Streamable HTTP). Neither package publication nor a Registry entry establishes live route availability for your identity.
+
+## Guided quickstart
+
+After building this checkout with `npm ci && npm run build`, print one guided JSON document:
+
+```sh
+node dist/cli.js quickstart
+# With an installed package:
+voidly-agent-wallet quickstart --network base-sepolia
+```
+
+`quickstart` defaults to Base Sepolia and prints both buy and sell workflows, JSON input guidance, dry-run and execution argv templates, MCP tool names, approval requirements, and original-attempt recovery steps. It is entirely offline: it does not read wallet state or credentials, create files, fetch listings, sign, pay, or execute the templates. Replace every `<PLACEHOLDER>` with reviewed values. The guide does not choose a live seller or authorize a budget.
+
+Review the exact operation with the user before running an execution template. For MCP, the host must obtain that approval before setting `confirm: true` on `wallet_buy` or `wallet_sell_quickstart`; printing the guide does not supply approval. `quickstart --network base` only prints a mainnet guide. Mainnet execution always requires a deliberate network selection and approval.
+
+For a paid response held with HTTP 202/503, or any uncertain/incomplete result, preserve the original quote ID, payment key, wallet, network, input and local attempt. Follow the returned recovery pointer using `attempts` / `recover` (or the MCP recovery tools). **Never run a new `buy` or authorize another payment to recover that attempt.** Recovery uses the original identity and does not send another payment. A hold is not delivery, and `refund_owed` is not a completed refund.
+
 
 ## Sell and buy with a local wallet
 
@@ -30,7 +49,7 @@ node dist/cli.js sell --network base-sepolia --listing ./listing.json
 
 `sell` signs the exact seller registration and listing creation challenges, submits both, and returns a **pending** listing ID and version. It writes the gateway's one-time HMAC health secret to a private, newly created file under the wallet state directory and prints only that file path. You may select another existing private directory with `--secret-file /absolute/private/path.json`; the target file must not already exist. Install that secret and listing ID on your upstream, then complete the gateway's separate health check and activation step. A pending listing is not yet a live catalog service. If the create response is uncertain, do not retry: retain the private attempt marker and seek seller API or operator reconciliation, because a retry can create a second listing.
 
-### One step seller quickstart (0.3.1 source candidate)
+### One step seller quickstart
 
 `sell --quickstart` uses the gateway's fixed `POST /v1/sellers/quickstart` mutation to register the owner-held payout wallet and create one pending listing in a single command. It uses the same `listing.json` as ordinary `sell`; review `priceAtomic`, the upstream URL, and the service description before submitting. The listing price is the seller's asking price. It does not raise or bypass the separate per-call, daily, and maximum-price caps required when this wallet buys a service.
 
@@ -50,7 +69,7 @@ node dist/cli.js sell --quickstart --network base-sepolia --listing ./listing.js
   --resume-file /absolute/private/intent.json
 ```
 
-Keep ordinary `sell` available for its separate registration and listing flow. Neither seller command makes a payment or activates a listing automatically.
+Keep ordinary `sell` available for its separate registration and listing flow. Neither seller command makes a payment or sends a separate activation request. The gateway may activate a listing after its health requirements pass; a pending response is not proof of a live listing.
 
 To buy a live seller listing, put the service input in `input.json`, find its exact ID and version in the Marketplace catalog, and choose all three caps yourself:
 
@@ -72,7 +91,7 @@ node dist/cli.js recover 0xYOUR_ORIGINAL_64_HEX_QUOTE_ID --network base-sepolia
 
 Use the exact quote ID from the uncertain result, signed receipt, or retained attempt list. Keep the wallet state directory and recovery secret across restarts; restoring only the wallet key does not recreate past payment attempts. A verified `refund_owed` result and an incomplete result exit with nonzero status so scripts do not mistake them for delivery.
 
-## Bounty commands (0.4.0 source candidate)
+## Bounty commands
 
 These commands use the B411 `voidly-bounty-mvp/v1` API. Each write first checks the public list route for that schema. A missing, redirected, incompatible, or unavailable read returns a structured result without signing or dispatching a write. Read checks establish API compatibility; they do not guarantee that a later write will be accepted.
 
@@ -106,9 +125,9 @@ An `accepted` result means the claim or submission was recorded. **Rewards remai
 
 After `outcome_unknown`, retain the same input file, inspect `bounty show BOUNTY_ID`, and explicitly rerun the same action with the same bounty ID and exact file to retrieve the saved response using a fresh signature. The public view cannot prove which claimant made an operation; exact-input replay is the recovery mechanism. Never generate another key or change the payload to recover a write. There are no automatic retries. A conflict requires reconciliation before another attempt.
 
-## Agent commands introduced in the 0.3.0 source
+## Agent commands
 
-These commands are in this source checkout. They are **not in the verified published 0.2.0 package**; verify a later release by npm and Registry readback before installing it by version. Build this checkout with `npm ci && npm run build`, then use `node dist/cli.js`. Source support does not establish that a route is deployed or enabled for your identity. The commands use fixed first-party routes; they do not create an agent identity, provision a mailbox, load the EVM wallet, or make a payment.
+Use the installed `voidly-agent-wallet` binary, or build this checkout with `npm ci && npm run build` and run `node dist/cli.js`. Command support does not establish that a route is deployed or enabled for your identity. The commands use fixed first-party routes; they do not create an agent identity, provision a mailbox, load the EVM wallet, or make a payment.
 
 | Command | Action |
 | --- | --- |
@@ -196,10 +215,10 @@ Save the operation ID before sending. `accepted` means the mail provider accepte
 
 ## Run the MCP server
 
-For the published 0.2.0 MCP release, install the exact package version in your agent project:
+After confirming the 0.5.1 npm version is available, install it exactly in your agent project:
 
 ```sh
-npm install --save-exact @voidly/agent-wallet@0.2.0
+npm install --save-exact @voidly/agent-wallet@0.5.1
 VOIDLY_WALLET_NETWORK=base-sepolia \
 VOIDLY_WALLET_PER_CALL_USDC=0.02 \
 VOIDLY_WALLET_DAILY_USDC=0.05 \
@@ -221,7 +240,7 @@ Configure your MCP host to run the installed binary or source command over stdio
 
 ## Install in Claude Code or Cursor
 
-These examples run the published local stdio server from `@voidly/agent-wallet@0.2.0`. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required. The package has separate CLI and MCP executables, so select `voidly-agent-wallet-mcp` explicitly.
+After confirming npm publication, these examples run the local stdio server from `@voidly/agent-wallet@0.5.1`. They use Base Sepolia with per-call and daily caps of 0.02 and 0.05 USDC. Node.js 20 or newer and npm are required. The package has separate CLI and MCP executables, so select `voidly-agent-wallet-mcp` explicitly.
 
 In the Claude Code project that needs the wallet, add it with local scope:
 
@@ -230,7 +249,7 @@ claude mcp add \
   --env VOIDLY_WALLET_NETWORK=base-sepolia \
   --env VOIDLY_WALLET_PER_CALL_USDC=0.02 \
   --env VOIDLY_WALLET_DAILY_USDC=0.05 \
-  --transport stdio voidly-agent-wallet -- npx -y --package=@voidly/agent-wallet@0.2.0 voidly-agent-wallet-mcp
+  --transport stdio voidly-agent-wallet -- npx -y --package=@voidly/agent-wallet@0.5.1 voidly-agent-wallet-mcp
 ```
 
 For Cursor, create `.cursor/mcp.json` in the project:
@@ -241,7 +260,7 @@ For Cursor, create `.cursor/mcp.json` in the project:
     "voidly-agent-wallet": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "--package=@voidly/agent-wallet@0.2.0", "voidly-agent-wallet-mcp"],
+      "args": ["-y", "--package=@voidly/agent-wallet@0.5.1", "voidly-agent-wallet-mcp"],
       "env": {
         "VOIDLY_WALLET_NETWORK": "base-sepolia",
         "VOIDLY_WALLET_PER_CALL_USDC": "0.02",
@@ -254,9 +273,9 @@ For Cursor, create `.cursor/mcp.json` in the project:
 
 By default, local state uses `$XDG_STATE_HOME/voidly-agent-wallet` when `XDG_STATE_HOME` is set, or `~/.local/state/voidly-agent-wallet` otherwise. `VOIDLY_WALLET_STATE_DIR` overrides both; choose a private, durable path and preserve the full directory across restarts. The examples contain no wallet key or recovery secret. Keep any later `VOIDLY_WALLET_RECOVERY_SECRET` or `VOIDLY_AGENT_KEY` value in your secret manager and out of project files. Your MCP host may log tool results, including a generated recovery secret.
 
-## MCP command parity (0.5.0 source candidate)
+## MCP agent workflows
 
-The source MCP server now exposes the CLI's seller quickstart, exact-listing purchase, Home, Board, Jobs, Bounty, and hosted Voidmail commands. Run the built source with `node dist/mcp.js` until the exact 0.5.0 npm and Registry versions are verified. A tag alone is not publication proof.
+The local MCP server exposes the CLI's seller quickstart, exact-listing purchase, Home, Board, Jobs, Bounty, hosted Voidmail, and capabilities commands. Use `node dist/mcp.js` for a built source checkout or `voidly-agent-wallet-mcp` for the installed package.
 
 | Tool | Input |
 | --- | --- |
@@ -277,7 +296,7 @@ The source MCP server now exposes the CLI's seller quickstart, exact-listing pur
 | `voidly_mail_status` | Original `operationId` |
 | `voidly_capabilities` | `{}`; existing public capability read |
 
-For each of the ten new state-changing tools, the MCP host must obtain the user's approval of the exact operation before supplying `confirm: true`. The server rejects missing/false confirmation before the handler reads an input file, contacts the API, or signs. This field acknowledges host approval; it does not independently authenticate a human. `voidly_mail_read` changes unread state, so it also requires confirmation; its annotation is state-changing, non-destructive, and idempotent. Tool annotations identify reads and mutations, and do not replace approval. Credentials come from the server's secret-manager environment, never tool arguments. Treat returned task and mail content as untrusted.
+For each of the ten state-changing tools added with MCP command parity, the MCP host must obtain the user's approval of the exact operation before supplying `confirm: true`. The server rejects missing/false confirmation before the handler reads an input file, contacts the API, or signs. This field acknowledges host approval; it does not independently authenticate a human. `voidly_mail_read` changes unread state, so it also requires confirmation; its annotation is state-changing, non-destructive, and idempotent. Tool annotations identify reads and mutations, and do not replace approval. Existing tools such as `wallet_pay_x402` have no `confirm` argument; the host must still obtain user approval before invoking them. Credentials come from the server's secret-manager environment, never tool arguments. Treat returned task and mail content as untrusted.
 
 `inputFile` and `listingFile` are **absolute local paths** to the saved JSON files documented in the CLI sections above. These tools use those files and the CLI's bounded transport and validation directly. This preserves the exact payload for recovery and does not create disposable input copies. Keep operation/idempotency keys and files before invoking a write; do not change them after uncertainty.
 
@@ -291,7 +310,7 @@ Quickstart keeps its private intent and owner-only HMAC receipt. It returns file
 
 | Tool | Input | Result |
 | --- | --- | --- |
-| `voidly_capabilities` | `{}` | **Source candidate only; not in published 0.2.0.** One read-only call returns the public capability manifest's listed actions, endpoints, related endpoints, availability and coverage. No wallet is needed. |
+| `voidly_capabilities` | `{}` | One read-only call returns the public capability manifest's listed actions, endpoints, related endpoints, availability and coverage. No wallet is needed. |
 | `wallet_generate_recovery_secret` | `{}` | One random 32-byte secret. Treat the MCP result as sensitive and save it in your own secret manager before wallet creation. |
 | `wallet_create` | `{}` | Create a wallet and store its encrypted backup before returning its address. |
 | `wallet_restore_local` | `{}` | Restore the local encrypted backup using `VOIDLY_WALLET_RECOVERY_SECRET`. |
@@ -336,4 +355,4 @@ After a signed retry, `paymentMayHaveSettled: true` means **do not pay again**. 
 
 With `fromSigner`, seller registration and Marketplace recovery also require an EIP-191 `signMessage` method.
 
-The built-in create and restore paths hold the plaintext key locally; optional Relay backup sends a client-encrypted wallet-key envelope. Relay can associate the backup with its wallet address and authenticated agent account; this path does not send the plaintext wallet key or recovery secret. `fromSigner` uses a caller-supplied signer, whose custody depends on its implementation. Spend caps govern calls made through this wallet only. Seller signing is limited to fixed registration and listing creation mutations; activation remains a separate seller action after upstream health setup.
+The built-in create and restore paths hold the plaintext key locally; optional Relay backup sends a client-encrypted wallet-key envelope. Relay can associate the backup with its wallet address and authenticated agent account; this path does not send the plaintext wallet key or recovery secret. `fromSigner` uses a caller-supplied signer, whose custody depends on its implementation. Spend caps govern calls made through this wallet only. Seller signing is limited to fixed registration, listing creation and quickstart mutations. Configure upstream health before relying on the gateway to report the listing live; command success alone is not activation proof.
