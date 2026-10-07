@@ -68,13 +68,15 @@ async function intentFiles(root: string): Promise<Array<{ path: string; value: R
   return found;
 }
 
-function quickstartResponse(listing: VoidlySellerListingInput): Response {
+function quickstartResponse(listing: VoidlySellerListingInput, health: {
+  healthState: string; healthCheckedAt: number | null; healthFailureCode: string | null;
+  updatedAt?: number;
+} = { healthState: 'unchecked', healthCheckedAt: null, healthFailureCode: null }): Response {
   return Response.json({
     provider: { wallet: ADDRESS, chainId: 84532, status: 'active',
       sellerDailyCapAtomic: null, sellerCapVersion: 1 },
     listing: { ...listing, outputPrivacy: 'plain-json', id: LISTING_ID, version: 1,
-      chainId: 84532, providerWallet: ADDRESS, status: 'pending', healthState: 'unchecked',
-      healthCheckedAt: null, healthFailureCode: null },
+      chainId: 84532, providerWallet: ADDRESS, status: 'pending', ...health },
     hmacSecretHex: HMAC_SECRET,
     upstreamContract: {
       url: listing.upstreamUrl,
@@ -193,6 +195,86 @@ test('uncertain quickstart keeps its intent and explicit resume uses the same ke
   assert.deepEqual(prepared[1], prepared[0], 'resume must reuse the exact intent payload');
   assert.deepEqual(events, ['prepare', 'post', 'prepare', 'post']);
   assert.equal((await stat(intentPath)).mode & 0o077, 0);
+});
+
+test('explicit resume accepts the same pending listing after a failed health probe', async () => {
+  const { root, listingPath, secretPath, listing } = await fixture();
+  const prepared: VoidlySellerQuickstartInput[] = [];
+  const wallet = inertWallet(root, [], prepared);
+  const posted: Array<{ payload: VoidlySellerQuickstartInput; message: string; signature: string }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    assert.equal(String(input), `${ORIGIN}/v1/sellers/quickstart`);
+    posted.push(JSON.parse(String(init?.body)) as typeof posted[number]);
+    if (posted.length === 1) throw new Error('synthetic response lost after gateway commit');
+    return quickstartResponse(listing, { healthState: 'failed',
+      healthCheckedAt: 1_760_000_000_000, updatedAt: 1_760_000_000_000,
+      healthFailureCode: 'upstream_unavailable' });
+  };
+  const dependencies = { env: { VOIDLY_WALLET_STATE_DIR: root }, fetcher,
+    restoreWallet: async () => wallet };
+  let intentPath = '';
+  await assert.rejects(runWalletCli(command(listingPath, secretPath), dependencies), error => {
+    assert.equal(error instanceof SellerQuickstartUncertainError, true);
+    intentPath = (error as SellerQuickstartUncertainError).intentFile;
+    return true;
+  });
+  assert.equal(posted.length, 1, 'the lost response must not trigger an automatic retry');
+  const originalKey = posted[0]!.payload.idempotencyKey;
+  const resumed = await runWalletCli(command(listingPath, secretPath,
+    ['--resume-file', intentPath]), dependencies);
+  assert.equal(resumed.status, 'pending_activation');
+  assert.equal(resumed.listingId, LISTING_ID);
+  assert.equal(resumed.intentFile, intentPath);
+  assert.equal(resumed.secretFile, secretPath);
+  assert.equal(posted.length, 2, 'only one POST per explicit invocation');
+  assert.equal(prepared.length, 2);
+  assert.equal(posted[1]!.payload.idempotencyKey, originalKey);
+  assert.deepEqual(posted[1]!.payload, posted[0]!.payload,
+    'resume must preserve the exact signed listing and idempotency key');
+  assert.notEqual(posted[1]!.message, posted[0]!.message, 'resume must use a fresh challenge');
+  assert.notEqual(posted[1]!.signature, posted[0]!.signature, 'resume must use a fresh signature');
+  assert.equal((await intentFiles(root)).length, 1);
+  assert.equal((await stat(secretPath)).mode & 0o077, 0);
+  const receipt = JSON.parse(await readFile(secretPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(receipt.listingId, LISTING_ID);
+  assert.equal(receipt.hmacSecretHex, HMAC_SECRET);
+  assert.equal(JSON.stringify(resumed).includes(HMAC_SECRET), false);
+});
+
+test('malformed failed-health recovery remains uncertain and leaves the secret unwritten', async () => {
+  for (const health of [
+    { healthState: 'failed', healthCheckedAt: null, healthFailureCode: '' },
+    { healthState: 'failed', healthCheckedAt: 1_760_000_000_000,
+      updatedAt: 1_760_000_000_001, healthFailureCode: 'upstream_unavailable' },
+  ]) {
+    const { root, listingPath, secretPath, listing } = await fixture();
+    const prepared: VoidlySellerQuickstartInput[] = [];
+    const wallet = inertWallet(root, [], prepared);
+    let posts = 0;
+    const fetcher: typeof fetch = async () => {
+      posts++;
+      if (posts === 1) throw new Error('synthetic response lost after gateway commit');
+      return quickstartResponse(listing, health);
+    };
+    const dependencies = { env: { VOIDLY_WALLET_STATE_DIR: root }, fetcher,
+      restoreWallet: async () => wallet };
+    let intentPath = '';
+    await assert.rejects(runWalletCli(command(listingPath, secretPath), dependencies), error => {
+      assert.equal(error instanceof SellerQuickstartUncertainError, true);
+      intentPath = (error as SellerQuickstartUncertainError).intentFile;
+      return true;
+    });
+    await assert.rejects(runWalletCli(command(listingPath, secretPath,
+      ['--resume-file', intentPath]), dependencies), error => {
+      assert.equal(error instanceof SellerQuickstartUncertainError, true);
+      assert.equal((error as SellerQuickstartUncertainError).intentFile, intentPath);
+      return true;
+    });
+    assert.equal(posts, 2);
+    assert.equal(prepared[1]!.idempotencyKey, prepared[0]!.idempotencyKey);
+    assert.equal((await intentFiles(root)).length, 1);
+    await assert.rejects(stat(secretPath), { code: 'ENOENT' });
+  }
 });
 
 test('a second fresh quickstart refuses the existing intent before another challenge or POST', async () => {
