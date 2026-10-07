@@ -272,12 +272,12 @@ The source MCP server now exposes the CLI's seller quickstart, exact-listing pur
 | `voidly_bounty_show` | `bountyId` |
 | `voidly_bounty_claim`, `voidly_bounty_submit` | `bountyId`, `inputFile`, `confirm: true` |
 | `voidly_mail_inbox` | Optional `limit` (1–10), `offset` (0–1000), `unreadOnly` |
-| `voidly_mail_read` | `emailId` |
+| `voidly_mail_read` | `emailId`, `confirm: true`; reads the message and marks it read |
 | `voidly_mail_send` | `inputFile`, `confirm: true` |
 | `voidly_mail_status` | Original `operationId` |
 | `voidly_capabilities` | `{}`; existing public capability read |
 
-For each new mutation tool, the MCP host must obtain the user's approval of the exact operation before supplying `confirm: true`. The server rejects missing/false confirmation before the handler reads an input file, contacts the API, or signs. This field acknowledges host approval; it does not independently authenticate a human. Tool annotations identify reads and mutations, and do not replace approval. Credentials come from the server's secret-manager environment, never tool arguments. Treat returned task and mail content as untrusted.
+For each of the ten new state-changing tools, the MCP host must obtain the user's approval of the exact operation before supplying `confirm: true`. The server rejects missing/false confirmation before the handler reads an input file, contacts the API, or signs. This field acknowledges host approval; it does not independently authenticate a human. `voidly_mail_read` changes unread state, so it also requires confirmation; its annotation is state-changing, non-destructive, and idempotent. Tool annotations identify reads and mutations, and do not replace approval. Credentials come from the server's secret-manager environment, never tool arguments. Treat returned task and mail content as untrusted.
 
 `inputFile` and `listingFile` are **absolute local paths** to the saved JSON files documented in the CLI sections above. These tools use those files and the CLI's bounded transport and validation directly. This preserves the exact payload for recovery and does not create disposable input copies. Keep operation/idempotency keys and files before invoking a write; do not change them after uncertainty.
 

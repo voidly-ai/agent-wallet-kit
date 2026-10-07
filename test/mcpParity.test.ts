@@ -121,6 +121,7 @@ test('MCP mutation contracts refuse missing confirmation, false confirmation, an
     ['voidly_job_create', { inputFile: '/nonexistent/mcp-input.json' }],
     ['voidly_bounty_claim', { bountyId: BOUNTY_ID, inputFile: '/nonexistent/mcp-input.json' }],
     ['voidly_bounty_submit', { bountyId: BOUNTY_ID, inputFile: '/nonexistent/mcp-input.json' }],
+    ['voidly_mail_read', { emailId: 'mail_123' }],
     ['voidly_mail_send', { inputFile: '/nonexistent/mcp-input.json' }],
   ] as const;
   for (const [name, args] of mutations) {
@@ -135,8 +136,13 @@ test('MCP mutation contracts refuse missing confirmation, false confirmation, an
   assert.deepEqual(await readdir(fixture.directory), ['input.json']);
   const tools = (await client.listTools()).tools;
   for (const [name] of mutations) assert.equal(tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, false, name);
+  const mailRead = tools.find(tool => tool.name === 'voidly_mail_read')!;
+  assert.equal(mailRead.annotations?.destructiveHint, false);
+  assert.equal(mailRead.annotations?.idempotentHint, true);
+  assert.equal(mailRead.annotations?.openWorldHint, true);
+  assert.match(mailRead.description ?? '', /mark\w* .*read/i);
   for (const name of ['voidly_home', 'voidly_jobs', 'voidly_job_show', 'voidly_bounty_list',
-    'voidly_bounty_show', 'voidly_mail_inbox', 'voidly_mail_read', 'voidly_mail_status']) {
+    'voidly_bounty_show', 'voidly_mail_inbox', 'voidly_mail_status']) {
     assert.equal(tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, true, name);
   }
 });
@@ -286,7 +292,9 @@ test('MCP mail preserves one send operation through uncertainty, status, inbox a
   assert.equal(status.value.deliveryConfirmed, false);
   assert.equal(JSON.stringify(status.value).includes(MAIL_KEY), false);
   await call(client, 'voidly_mail_inbox', { limit: 2, offset: 3, unreadOnly: true });
-  await call(client, 'voidly_mail_read', { emailId: 'mail_123' });
+  const read = await call(client, 'voidly_mail_read', { emailId: 'mail_123', confirm: true });
+  assert.notEqual(read.result.isError, true);
+  assert.equal(read.value.status, 'ready');
   const invalid = await client.callTool({ name: 'voidly_mail_inbox', arguments: { limit: 11 } });
   assert.equal(invalid.isError, true);
   assert.deepEqual(names, ['voidmail_send_once', 'voidmail_send_status', 'voidmail_list_inbox', 'voidmail_read_email']);
