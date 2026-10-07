@@ -1,17 +1,18 @@
 #!/usr/bin/env node
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, realpath, unlink, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { AGENT_CLI_USAGE, isAgentCliCommand, runAgentCli } from './agentCli.js';
 import { fetchMarketplaceListing } from './buyListing.js';
 import {
   AgentWallet, FileMarketplaceAttemptStore, FileSpendStore, LocalWalletBackupStore,
   PaymentMayHaveSettledError, usdToAtomic, validateSpendLimits,
   validateVoidlySellerListingInput, type AgentWalletOptions, type BaseNetwork,
-  type SpendLimits,
+  type SpendLimits, type VoidlySellerListingInput, type VoidlySellerQuickstartInput,
 } from './index.js';
 
 const ORIGINS = {
@@ -24,9 +25,14 @@ const QUOTE_ID = /^0x[0-9a-f]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const MAX_FILE_BYTES = 65_536;
 const MAX_SELLER_REPLY_BYTES = 16_384;
+const MAX_QUICKSTART_REPLY_BYTES = 65_536;
+const MAX_PRIVATE_SELLER_BYTES = 131_072;
+const QUICKSTART_KEY = /^[A-Za-z0-9_-]{16,64}$/;
+const SELLER_DID = /^did:voidly:[1-9A-HJ-NP-Za-km-z]{1,32}$/;
 
 type CliWallet = Pick<AgentWallet, 'address' | 'network' | 'prepareVoidlySellerRegistration' |
-  'prepareVoidlySellerListingCreate' | 'payX402' | 'marketplaceAttempts' | 'recoverMarketplace'>;
+  'prepareVoidlySellerListingCreate' | 'prepareVoidlySellerQuickstart' |
+  'payX402' | 'marketplaceAttempts' | 'recoverMarketplace'>;
 
 export interface WalletCliDependencies {
   /** Offline test seams. Runtime always uses platform fetch and an encrypted local vault. */
@@ -52,15 +58,53 @@ export class SellerSecretPersistenceError extends Error {
   }
 }
 
+export class SellerQuickstartUncertainError extends Error {
+  readonly code = 'seller_quickstart_uncertain';
+  readonly automaticRetry = false;
+  readonly retrySameIntent = true;
+  constructor(readonly intentFile: string, readonly secretFile: string) {
+    super('Quickstart may have created a pending listing. Keep the private intent; retry explicitly with --resume-file to sign a fresh challenge for the same payload and key. Reconcile a conflict before another attempt.');
+  }
+}
+
+export class SellerQuickstartSecretPersistenceError extends Error {
+  readonly code = 'seller_quickstart_secret_persistence_failed';
+  readonly automaticRetry = false;
+  readonly retrySameIntent = true;
+  constructor(readonly intentFile: string, readonly secretFile: string) {
+    super('Quickstart may have succeeded, but its health secret was not durably saved. Keep the private intent and recover with a fresh signed same-intent retry before activating the listing.');
+  }
+}
+
+export class SellerQuickstartConflictError extends Error {
+  readonly code = 'seller_quickstart_conflict';
+  readonly automaticRetry = false;
+  readonly retrySameIntent = false;
+  constructor(readonly intentFile: string) {
+    super('Quickstart returned a conflict. Keep the private intent and reconcile the listing; a changed or activated listing cannot return the old health secret.');
+  }
+}
+
+export class SellerQuickstartExistingIntentError extends Error {
+  readonly code = 'seller_quickstart_existing_intent';
+  readonly automaticRetry = false;
+  readonly retrySameIntent = true;
+  constructor(readonly intentFile: string) {
+    super('A private quickstart intent already exists for this wallet and listing. Use --resume-file with that intent; do not allocate a new idempotency key.');
+  }
+}
+
 const USAGE = `${AGENT_CLI_USAGE}
 
 voidly-agent-wallet sell --network base|base-sepolia --listing listing.json [--secret-file /private/path.json] [--dry-run]
+voidly-agent-wallet sell --quickstart --network base|base-sepolia --listing listing.json [--did DID] [--secret-file /private/path.json] [--dry-run]
+voidly-agent-wallet sell --quickstart --network base|base-sepolia --listing listing.json --resume-file /private/intent.json
 voidly-agent-wallet buy <listing-id> --network base|base-sepolia --version N --input input.json --per-call-usdc AMOUNT --daily-usdc AMOUNT --max-usdc AMOUNT [--dry-run]
 voidly-agent-wallet attempts --network base|base-sepolia
 voidly-agent-wallet recover <quote-id> --network base|base-sepolia
 
 Both commands restore an existing encrypted local wallet with VOIDLY_WALLET_RECOVERY_SECRET.
-sell registers the payout wallet and creates a pending listing. Activate it after installing the one-time health secret on your upstream.
+sell registers the payout wallet and creates a pending listing. --quickstart performs one signed gateway mutation with a durable idempotency intent. Both leave activation separate; health secrets are written only to private files.
 buy makes one bounded x402 call. An uncertain paid retry must be recovered with the original quote ID; never run buy again for that attempt.`;
 
 function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recover' | 'help'; positional: string[]; flags: Map<string, string> } {
@@ -72,7 +116,7 @@ function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recove
   const flags = new Map<string, string>();
   const positional: string[] = [];
   const allowed = command === 'sell'
-    ? new Set(['network', 'listing', 'secret-file', 'dry-run'])
+    ? new Set(['network', 'listing', 'secret-file', 'dry-run', 'quickstart', 'resume-file', 'did'])
     : command === 'buy'
       ? new Set(['network', 'version', 'input', 'per-call-usdc', 'daily-usdc', 'max-usdc', 'dry-run'])
       : new Set(['network']);
@@ -81,7 +125,7 @@ function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recove
     if (!part.startsWith('--')) { positional.push(part); continue; }
     const key = part.slice(2);
     if (!allowed.has(key) || flags.has(key)) throw new Error(`Unknown or repeated option: ${part}`);
-    if (key === 'dry-run') { flags.set(key, '1'); continue; }
+    if (key === 'dry-run' || key === 'quickstart') { flags.set(key, '1'); continue; }
     const value = argv[++i];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${part}`);
     flags.set(key, value);
@@ -90,6 +134,8 @@ function parse(argv: string[]): { command: 'sell' | 'buy' | 'attempts' | 'recove
     command === 'attempts' && positional.length !== 0 || command === 'recover' && positional.length !== 1) {
     throw new Error(USAGE);
   }
+  if (command === 'sell' && (!flags.has('quickstart') && (flags.has('resume-file') || flags.has('did')) ||
+      flags.has('dry-run') && flags.has('resume-file'))) throw new Error(USAGE);
   return { command, positional, flags };
 }
 
@@ -145,8 +191,8 @@ async function syncDirectory(path: string): Promise<void> {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 
-async function privateSecretFile(path: string, createParent: boolean): Promise<FileHandle> {
-  if (!isAbsolute(path)) throw new Error('Seller secret file path must be absolute');
+async function privateSellerParent(path: string, createParent: boolean): Promise<string> {
+  if (!isAbsolute(path)) throw new Error('Seller private file path must be absolute');
   const parent = dirname(path);
   if (createParent) {
     try { await mkdir(parent, { mode: 0o700 }); }
@@ -159,6 +205,11 @@ async function privateSecretFile(path: string, createParent: boolean): Promise<F
     throw new Error('Seller secret directory must be private, owned by this user, and contain no symlinks');
   }
   if (createParent) await syncDirectory(dirname(parent));
+  return parent;
+}
+
+async function privateSecretFile(path: string, createParent: boolean): Promise<FileHandle> {
+  await privateSellerParent(path, createParent);
   return open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
 }
 
@@ -192,14 +243,15 @@ async function readBoundedBytes(response: Response, maxBytes: number): Promise<B
   return Buffer.concat(chunks, size);
 }
 
-async function sellerJson(response: Response, expectedUrl: string, expectedStatus: number): Promise<Record<string, unknown>> {
+async function sellerJson(response: Response, expectedUrl: string, expectedStatus: number,
+  maxBytes = MAX_SELLER_REPLY_BYTES): Promise<Record<string, unknown>> {
   if (response.status !== expectedStatus || response.redirected || response.url && response.url !== expectedUrl ||
     !/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get('content-type') ?? '')) {
     throw new Error(`Seller endpoint did not return the expected response (HTTP ${response.status})`);
   }
   let value: unknown;
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
-    await readBoundedBytes(response, MAX_SELLER_REPLY_BYTES))); }
+    await readBoundedBytes(response, maxBytes))); }
   catch { throw new Error('Seller endpoint returned invalid JSON'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Seller endpoint returned an invalid result');
@@ -215,6 +267,248 @@ async function postSeller(fetcher: typeof fetch, url: string, body: unknown, sta
     body: JSON.stringify(body),
   });
   return sellerJson(response, url, status);
+}
+
+type QuickstartIntent = {
+  version: 1; network: BaseNetwork; gateway: string; sellerWallet: string;
+  idempotencyKey: string; keySha256: string; listingSha256: string; payloadSha256: string;
+  did: string | null; secretFile: string; createdAt: string;
+};
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function quickstartPayload(key: string, listing: VoidlySellerListingInput, did: string | null): VoidlySellerQuickstartInput {
+  return { idempotencyKey: key, listing, ...(did ? { did } : {}) };
+}
+
+async function readPrivateSellerJson(path: string): Promise<Record<string, unknown>> {
+  await privateSellerParent(path, false);
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size < 1 ||
+      before.size > MAX_PRIVATE_SELLER_BYTES || (before.mode & 0o077) !== 0 ||
+      typeof process.getuid === 'function' && before.uid !== process.getuid()) {
+    throw new Error('Seller private file must be an owner-only regular file');
+  }
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let bytes: Buffer;
+  try {
+    const after = await file.stat();
+    if (!after.isFile() || after.ino !== before.ino || after.dev !== before.dev || after.nlink !== 1 ||
+        (after.mode & 0o077) !== 0 || after.size < 1 || after.size > MAX_PRIVATE_SELLER_BYTES) {
+      throw new Error('Seller private file changed during read');
+    }
+    bytes = await file.readFile();
+  } finally { await file.close(); }
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { throw new Error('Seller private file is invalid JSON'); }
+  if (!record(value)) throw new Error('Seller private file is invalid');
+  return value;
+}
+
+async function writePrivateSellerJson(path: string, value: unknown, createParent: boolean): Promise<void> {
+  const file = await privateSecretFile(path, createParent);
+  try {
+    await file.writeFile(`${JSON.stringify(value)}\n`);
+    await file.sync();
+  } finally { await file.close(); }
+  await syncDirectory(dirname(path));
+}
+
+async function privateFileExists(path: string): Promise<boolean> {
+  try { await lstat(path); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function isPrivatePartialSellerFile(path: string): Promise<boolean> {
+  await privateSellerParent(path, false);
+  const file = await lstat(path);
+  return file.isFile() && !file.isSymbolicLink() && file.nlink === 1 &&
+    file.size <= MAX_PRIVATE_SELLER_BYTES && (file.mode & 0o077) === 0 &&
+    (typeof process.getuid !== 'function' || file.uid === process.getuid());
+}
+
+function checkedQuickstartIntent(value: Record<string, unknown>, network: BaseNetwork, origin: string,
+  listing: VoidlySellerListingInput, selectedDid: string | undefined,
+  selectedSecretFile: string | undefined): QuickstartIntent {
+  const keys = ['version', 'network', 'gateway', 'sellerWallet', 'idempotencyKey', 'keySha256',
+    'listingSha256', 'payloadSha256', 'did', 'secretFile', 'createdAt'];
+  const key = value.idempotencyKey;
+  const did = value.did;
+  const expectedPayload = typeof key === 'string' && QUICKSTART_KEY.test(key) &&
+    (did === null || typeof did === 'string' && SELLER_DID.test(did))
+    ? quickstartPayload(key, listing, did) : null;
+  if (Object.keys(value).sort().join(',') !== keys.sort().join(',') ||
+      value.version !== 1 || value.network !== network || value.gateway !== origin ||
+      typeof value.sellerWallet !== 'string' || !ADDRESS.test(value.sellerWallet) ||
+      !expectedPayload || value.keySha256 !== sha256(key as string) ||
+      value.listingSha256 !== sha256(JSON.stringify(listing)) ||
+      value.payloadSha256 !== sha256(JSON.stringify(expectedPayload)) ||
+      typeof value.secretFile !== 'string' || !isAbsolute(value.secretFile) ||
+      selectedSecretFile !== undefined && selectedSecretFile !== value.secretFile ||
+      selectedDid !== undefined && selectedDid !== did ||
+      typeof value.createdAt !== 'string') {
+    throw new Error('Quickstart intent conflicts with the listing, network, DID, or secret path; reconcile before retry');
+  }
+  return value as QuickstartIntent;
+}
+
+function checkedQuickstartResult(value: Record<string, unknown>, listingInput: VoidlySellerListingInput,
+  walletAddress: string, network: BaseNetwork): { listingId: string; version: number; keyVersion: number } {
+  const provider = value.provider;
+  const listing = value.listing;
+  const upstream = value.upstreamContract;
+  const chainId = network === 'base' ? 8453 : 84532;
+  if (!record(provider) || !record(listing) || !record(upstream) ||
+      typeof value.hmacSecretHex !== 'string' || !SECRET_HEX.test(value.hmacSecretHex) ||
+      provider.status !== 'active' || provider.chainId !== chainId ||
+      typeof provider.wallet !== 'string' || provider.wallet.toLowerCase() !== walletAddress.toLowerCase() ||
+      typeof listing.id !== 'string' || !LISTING_ID.test(listing.id) ||
+      listing.version !== 1 || listing.status !== 'pending' || listing.healthState !== 'unchecked' ||
+      listing.healthCheckedAt !== null || listing.healthFailureCode !== null ||
+      listing.chainId !== chainId || typeof listing.providerWallet !== 'string' ||
+      listing.providerWallet.toLowerCase() !== walletAddress.toLowerCase() ||
+      listing.name !== listingInput.name || listing.description !== listingInput.description ||
+      listing.category !== listingInput.category || listing.upstreamUrl !== listingInput.upstreamUrl ||
+      listing.method !== listingInput.method || listing.priceAtomic !== listingInput.priceAtomic ||
+      listing.outputPrivacy !== (listingInput.outputPrivacy ?? 'plain-json') ||
+      !isDeepStrictEqual(listing.tags, listingInput.tags ?? []) ||
+      !isDeepStrictEqual(listing.inputSchema, listingInput.inputSchema) ||
+      !isDeepStrictEqual(listing.outputSchema, listingInput.outputSchema) ||
+      upstream.url !== listingInput.upstreamUrl ||
+      upstream.secretEncoding !== '32-byte key, lowercase hex; HMAC-SHA256 signatures are lowercase hex' ||
+      !record(upstream.health) || !record(upstream.health.requestHeaders) ||
+      upstream.health.method !== 'GET' || upstream.health.keyVersion !== 1 ||
+      upstream.health.requestHeaders['X-Voidpay-Health-Listing'] !== listing.id ||
+      !record(upstream.paidCall) || upstream.paidCall.method !== listingInput.method ||
+      !record(upstream.activation) || upstream.activation.path !== `/v1/listings/${listing.id}/activate` ||
+      upstream.activation.action !== 'listing_activate') {
+    throw new Error('Quickstart response conflicts with the signed listing or health contract');
+  }
+  return { listingId: listing.id, version: 1, keyVersion: 1 };
+}
+
+function checkedQuickstartReceipt(receipt: Record<string, unknown>, intent: QuickstartIntent,
+  intentFile: string, network: BaseNetwork, origin: string): string {
+  if (receipt.intentFile !== intentFile || receipt.keySha256 !== intent.keySha256 ||
+      receipt.network !== network || receipt.gateway !== origin ||
+      receipt.sellerWallet !== intent.sellerWallet ||
+      typeof receipt.listingId !== 'string' || !LISTING_ID.test(receipt.listingId) ||
+      receipt.listingVersion !== 1 || typeof receipt.hmacSecretHex !== 'string' ||
+      !SECRET_HEX.test(receipt.hmacSecretHex)) {
+    throw new Error('Existing quickstart receipt conflicts with the private intent; reconcile before retry');
+  }
+  return receipt.listingId;
+}
+
+async function runQuickstartSell(input: {
+  network: BaseNetwork; origin: string; listing: VoidlySellerListingInput;
+  stateDir: string; flags: Map<string, string>; fetcher: typeof fetch; restore: () => Promise<CliWallet>;
+}): Promise<Record<string, unknown>> {
+  const { network, origin, listing, stateDir, flags, fetcher, restore } = input;
+  const selectedDid = flags.get('did');
+  if (selectedDid !== undefined && !SELLER_DID.test(selectedDid)) throw new Error('Invalid seller DID');
+  const resumeFile = flags.get('resume-file');
+  const listingHash = sha256(JSON.stringify(listing));
+  let intentFile: string;
+  let intent: QuickstartIntent;
+  let wallet: CliWallet | undefined;
+  if (resumeFile !== undefined) {
+    if (!isAbsolute(resumeFile)) throw new Error('--resume-file must be an absolute private path');
+    intentFile = resumeFile;
+    intent = checkedQuickstartIntent(await readPrivateSellerJson(intentFile), network, origin,
+      listing, selectedDid, flags.get('secret-file'));
+  } else {
+    wallet = await restore();
+    if (wallet.network !== network) throw new Error('Restored wallet network differs from --network');
+    const sellerWallet = wallet.address.toLowerCase();
+    if (!ADDRESS.test(sellerWallet)) throw new Error('Restored wallet address is invalid');
+    const did = selectedDid ?? null;
+    const intentName = sha256(`${network}\n${sellerWallet}\n${listingHash}`);
+    intentFile = join(stateDir, 'seller-quickstart', `${intentName}.intent.json`);
+    await privateSellerParent(intentFile, true);
+    if (await privateFileExists(intentFile)) throw new SellerQuickstartExistingIntentError(intentFile);
+    const secretFile = flags.get('secret-file') ?? intentFile.replace(/\.intent\.json$/, '.secret.json');
+    await privateSellerParent(secretFile, false);
+    if (await privateFileExists(secretFile)) throw new Error('Quickstart secret path already exists');
+    const idempotencyKey = randomBytes(24).toString('base64url');
+    const payload = quickstartPayload(idempotencyKey, listing, did);
+    intent = { version: 1, network, gateway: origin, sellerWallet, idempotencyKey,
+      keySha256: sha256(idempotencyKey), listingSha256: listingHash,
+      payloadSha256: sha256(JSON.stringify(payload)), did, secretFile,
+      createdAt: new Date().toISOString() };
+    await writePrivateSellerJson(intentFile, intent, false);
+  }
+  const secretFile = intent.secretFile;
+  await privateSellerParent(secretFile, false);
+  let receiptFile = secretFile;
+  if (resumeFile !== undefined) {
+    // Preserve partial private receipts after a failed write. Explicit resume uses the
+    // same signed intent and writes recovery into the first unused private path.
+    for (let recoveryIndex = 0; recoveryIndex <= 8; recoveryIndex++) {
+      if (!await privateFileExists(receiptFile)) break;
+      let receipt: Record<string, unknown>;
+      try { receipt = await readPrivateSellerJson(receiptFile); }
+      catch (error) {
+        if (!await isPrivatePartialSellerFile(receiptFile)) throw error;
+        if (recoveryIndex === 8) throw new Error('Quickstart private recovery receipt limit reached; reconcile the intent');
+        receiptFile = `${secretFile}.recovery-${String(recoveryIndex + 1).padStart(2, '0')}.json`;
+        continue;
+      }
+      const listingId = checkedQuickstartReceipt(receipt, intent, intentFile, network, origin);
+      return { command: 'sell', quickstart: true, status: 'pending_activation', network, gateway: origin,
+        sellerWallet: intent.sellerWallet, listingId, version: 1,
+        intentFile, secretFile: receiptFile,
+        next: 'Install the private HMAC secret on the upstream, then perform separate health and activation steps.' };
+    }
+  } else if (await privateFileExists(secretFile)) {
+    throw new Error('Quickstart secret path already exists');
+  }
+  wallet ??= await restore();
+  if (wallet.network !== network || wallet.address.toLowerCase() !== intent.sellerWallet) {
+    throw new Error('Restored wallet does not match the private quickstart intent');
+  }
+  const payload = quickstartPayload(intent.idempotencyKey, listing, intent.did);
+  const prepared = await wallet.prepareVoidlySellerQuickstart(payload);
+  const submitUrl = `${origin}/v1/sellers/quickstart`;
+  if (prepared.submitUrl !== submitUrl || !isDeepStrictEqual(prepared.body.payload, payload)) {
+    throw new Error('Seller quickstart target or signed payload changed');
+  }
+  let created: Record<string, unknown>;
+  let verified: { listingId: string; version: number; keyVersion: number };
+  try {
+    const response = await fetcher(submitUrl, {
+      method: 'POST', redirect: 'manual', credentials: 'omit', cache: 'no-store',
+      signal: AbortSignal.timeout(15_000),
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(prepared.body),
+    });
+    if (response.status === 409) throw new SellerQuickstartConflictError(intentFile);
+    created = await sellerJson(response, submitUrl, 201, MAX_QUICKSTART_REPLY_BYTES);
+    verified = checkedQuickstartResult(created, listing, wallet.address, network);
+  } catch (error) {
+    if (error instanceof SellerQuickstartConflictError) throw error;
+    throw new SellerQuickstartUncertainError(intentFile, receiptFile);
+  }
+  const receipt = { version: 1, network, gateway: origin, sellerWallet: intent.sellerWallet,
+    intentFile, keySha256: intent.keySha256, listingId: verified.listingId,
+    listingVersion: verified.version, hmacSecretHex: created.hmacSecretHex,
+    upstreamContract: created.upstreamContract, createdAt: new Date().toISOString() };
+  try { await writePrivateSellerJson(receiptFile, receipt, false); }
+  catch { throw new SellerQuickstartSecretPersistenceError(intentFile, receiptFile); }
+  return { command: 'sell', quickstart: true, status: 'pending_activation', network, gateway: origin,
+    listingId: verified.listingId, version: verified.version, sellerWallet: intent.sellerWallet,
+    intentFile, secretFile: receiptFile, healthUrl: listing.upstreamUrl, healthKeyVersion: verified.keyVersion,
+    next: 'Install the private HMAC secret on the upstream, then perform separate health and activation steps.' };
 }
 
 async function paidResponse(response: Response, verifiedStatus: 'delivered' | 'refund_owed',
@@ -291,6 +585,17 @@ export async function runWalletCli(argv: string[], dependencies: WalletCliDepend
   if (command === 'sell') {
     const payload = validateVoidlySellerListingInput(await jsonFile(required(flags, 'listing')));
     if (payload.method !== 'POST') throw new Error('CLI seller listings must use POST');
+    if (flags.has('quickstart')) {
+      const selectedDid = flags.get('did');
+      if (selectedDid !== undefined && !SELLER_DID.test(selectedDid)) throw new Error('Invalid seller DID');
+      if (flags.has('dry-run')) return { command, quickstart: true, network, gateway: origin,
+        status: 'ready', name: payload.name, priceAtomic: payload.priceAtomic,
+        upstreamUrl: payload.upstreamUrl,
+        effect: 'One signed gateway quickstart mutation creates a pending listing; no signing, key allocation, wallet restore, or network request in this dry run.' };
+      return runQuickstartSell({ network, origin, listing: payload, stateDir, flags, fetcher,
+        restore: () => restore({ network, limits: { perCallUsd: '1', dailyUsd: '1' },
+          stateDir, origin, mode: 'sell', fetcher }) });
+    }
     if (flags.has('dry-run')) {
       return { command, network, gateway: origin, status: 'ready', name: payload.name,
         priceAtomic: payload.priceAtomic, upstreamUrl: payload.upstreamUrl,
@@ -410,6 +715,19 @@ function errorResult(error: unknown, argv: string[]): Record<string, unknown> {
         : `voidly-agent-wallet attempts --network ${network}`
       : null;
     return { error: error.message, ...error.toResult(), doNotRepay: true, recoveryCommand };
+  }
+  if (error instanceof SellerQuickstartUncertainError ||
+      error instanceof SellerQuickstartSecretPersistenceError) {
+    return { error: error.message, code: error.code, intentFile: error.intentFile,
+      secretFile: error.secretFile, automaticRetry: false, retrySameIntent: true };
+  }
+  if (error instanceof SellerQuickstartConflictError) {
+    return { error: error.message, code: error.code, intentFile: error.intentFile,
+      automaticRetry: false, retrySameIntent: false };
+  }
+  if (error instanceof SellerQuickstartExistingIntentError) {
+    return { error: error.message, code: error.code, intentFile: error.intentFile,
+      automaticRetry: false, retrySameIntent: true };
   }
   if (error instanceof SellerCreationUncertainError) {
     return { error: error.message, code: error.code, secretFile: error.secretFile, doNotRetry: true };

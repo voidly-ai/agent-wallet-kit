@@ -9,12 +9,15 @@ const STATEMENT = 'Authorize one Voidly marketplace mutation. This does not tran
 const CHALLENGE_PATH = '/v1/providers/challenge';
 const REGISTER_PATH = '/v1/providers/register';
 const LISTING_CREATE_PATH = '/v1/listings';
+const QUICKSTART_PATH = '/v1/sellers/quickstart';
 const MAX_RESPONSE_BYTES = 4_096;
 const MAX_LISTING_BYTES = 12_000;
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const NONCE = /^[0-9a-f]{32}$/;
 const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 const TAG = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{16,64}$/;
+const AGENT_DID = /^did:voidly:[1-9A-HJ-NP-Za-km-z]{1,32}$/;
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 const ORIGINS = {
@@ -46,11 +49,24 @@ export interface PreparedVoidlySellerListingCreate {
   body: { payload: VoidlySellerListingInput; message: string; signature: `0x${string}` };
 }
 
+export interface VoidlySellerQuickstartInput {
+  idempotencyKey: string;
+  listing: VoidlySellerListingInput;
+  did?: string;
+}
+
+export interface PreparedVoidlySellerQuickstart {
+  submitUrl: string;
+  body: { payload: VoidlySellerQuickstartInput; message: string; signature: `0x${string}` };
+}
+
+type SellerMutationAction = 'register' | 'listing_create' | 'seller_quickstart';
+
 function digest(value: string): `0x${string}` {
   return `0x${createHash('sha256').update(value, 'utf8').digest('hex')}`;
 }
 
-function mutationResource(action: 'register' | 'listing_create', path: string, canonicalPayload: string): string {
+function mutationResource(action: SellerMutationAction, path: string, canonicalPayload: string): string {
   const bodyDigest = digest(canonicalPayload);
   const mutationDigest = digest(JSON.stringify([
     'voidly-marketplace-mutation-v1', action, '', 'POST', path, bodyDigest,
@@ -58,8 +74,8 @@ function mutationResource(action: 'register' | 'listing_create', path: string, c
   return `urn:voidly:marketplace:mutation:v1:${action}:none:${mutationDigest.slice(2)}`;
 }
 
-function invalidChallenge(action: 'register' | 'listing_create'): never {
-  throw new Error(`Voidly seller ${action === 'register' ? 'registration' : 'listing'} challenge is invalid`);
+function invalidChallenge(action: SellerMutationAction): never {
+  throw new Error(`Voidly seller ${action === 'register' ? 'registration' : action === 'listing_create' ? 'listing' : 'quickstart'} challenge is invalid`);
 }
 
 function invalidListingInput(): never {
@@ -157,7 +173,19 @@ export function validateVoidlySellerListingInput(input: unknown): VoidlySellerLi
   return checkedListingPayload(input).payload;
 }
 
-async function boundedJson(response: Response, action: 'register' | 'listing_create'): Promise<unknown> {
+function checkedQuickstartPayload(input: unknown): { payload: VoidlySellerQuickstartInput; canonical: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) invalidListingInput();
+  const row = input as Record<string, unknown>;
+  if (Object.keys(row).sort().join(',') !== (row.did === undefined ? 'idempotencyKey,listing' : 'did,idempotencyKey,listing') ||
+      typeof row.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY.test(row.idempotencyKey) ||
+      row.did !== undefined && (typeof row.did !== 'string' || !AGENT_DID.test(row.did))) invalidListingInput();
+  const listing = checkedListingPayload(row.listing).payload;
+  const payload: VoidlySellerQuickstartInput = { idempotencyKey: row.idempotencyKey, listing,
+    ...(row.did === undefined ? {} : { did: row.did as string }) };
+  return { payload, canonical: canonicalListingJson(payload) };
+}
+
+async function boundedJson(response: Response, action: SellerMutationAction): Promise<unknown> {
   if (response.status !== 200 || response.redirected || response.type === 'opaqueredirect' ||
       !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '')) invalidChallenge(action);
   const declaredLength = response.headers.get('content-length');
@@ -193,7 +221,7 @@ async function boundedJson(response: Response, action: 'register' | 'listing_cre
 }
 
 function checkedMessage(value: unknown, network: BaseNetwork, address: `0x${string}`,
-  resource: string, action: 'register' | 'listing_create'): {
+  resource: string, action: SellerMutationAction, extraResources: string[] = []): {
   message: string; expiresAtMs: number;
 } {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -214,7 +242,7 @@ function checkedMessage(value: unknown, network: BaseNetwork, address: `0x${stri
       !parsed.address || !parsed.issuedAt || !parsed.expirationTime ||
       parsed.notBefore !== undefined || parsed.requestId !== undefined ||
       !Array.isArray(parsed.resources) ||
-      JSON.stringify(parsed.resources) !== JSON.stringify([resource])) invalidChallenge(action);
+      JSON.stringify(parsed.resources) !== JSON.stringify([resource, ...extraResources])) invalidChallenge(action);
   let messageAddress: string;
   try { messageAddress = getAddress(parsed.address).toLowerCase(); } catch { invalidChallenge(action); }
   if (messageAddress !== address.toLowerCase() ||
@@ -228,7 +256,7 @@ function checkedMessage(value: unknown, network: BaseNetwork, address: `0x${stri
     scheme: 'https', domain: expected.domain, uri: `${expected.origin}${CHALLENGE_PATH}`,
     address: messageAddress as `0x${string}`, chainId: expected.chainId, version: '1',
     nonce, issuedAt: parsed.issuedAt, expirationTime: parsed.expirationTime,
-    statement: STATEMENT, resources: [resource],
+    statement: STATEMENT, resources: [resource, ...extraResources],
   });
   if (canonical !== message) invalidChallenge(action);
   return { message, expiresAtMs: parsed.expirationTime.getTime() };
@@ -240,12 +268,13 @@ async function prepareMutation<T extends object>(input: {
   allowedOrigins: readonly string[];
   signer: ClientEvmSigner;
   fetcher: typeof fetch;
-}, action: 'register' | 'listing_create', path: string, payload: T, canonicalPayload: string): Promise<{
+}, action: SellerMutationAction, path: string, payload: T, canonicalPayload: string,
+  extraResources: string[] = []): Promise<{
   submitUrl: string;
   body: { payload: T; message: string; signature: `0x${string}` };
 }> {
   const { origin } = ORIGINS[input.network];
-  const label = action === 'register' ? 'registration' : 'listing';
+  const label = action === 'register' ? 'registration' : action === 'listing_create' ? 'listing' : 'quickstart';
   if (!input.allowedOrigins.includes(origin)) throw new Error(`Voidly seller ${label} origin is not allowed`);
   const signer = input.signer as ClientEvmSigner & {
     signMessage?: (args: { message: string }) => Promise<`0x${string}`>;
@@ -264,7 +293,7 @@ async function prepareMutation<T extends object>(input: {
   if (response.url && response.url !== challengeUrl) invalidChallenge(action);
   const resource = mutationResource(action, path, canonicalPayload);
   const { message, expiresAtMs } = checkedMessage(await boundedJson(response, action),
-    input.network, input.address, resource, action);
+    input.network, input.address, resource, action, extraResources);
   let signature: `0x${string}`;
   try { signature = await signer.signMessage({ message }); }
   catch { throw new Error(`Voidly seller ${label} signing failed`); }
@@ -301,4 +330,18 @@ export async function prepareVoidlySellerListingCreate(input: {
 }): Promise<PreparedVoidlySellerListingCreate> {
   const { payload, canonical } = checkedListingPayload(input.payload);
   return prepareMutation(input, 'listing_create', LISTING_CREATE_PATH, payload, canonical);
+}
+
+/** Prepare one fixed, one-use quickstart mutation; a fresh challenge is required for a signed retry. */
+export async function prepareVoidlySellerQuickstart(input: {
+  network: BaseNetwork;
+  address: `0x${string}`;
+  allowedOrigins: readonly string[];
+  signer: ClientEvmSigner;
+  fetcher: typeof fetch;
+  payload: VoidlySellerQuickstartInput;
+}): Promise<PreparedVoidlySellerQuickstart> {
+  const { payload, canonical } = checkedQuickstartPayload(input.payload);
+  return prepareMutation(input, 'seller_quickstart', QUICKSTART_PATH, payload, canonical,
+    payload.did ? [payload.did] : []);
 }
