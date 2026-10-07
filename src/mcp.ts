@@ -10,6 +10,9 @@ import { z } from 'zod';
 import { AgentWallet, PaymentMayHaveSettledError, RelayWalletBackupStore, LocalWalletBackupStore, FileSpendStore, FileMarketplaceAttemptStore, generateRecoverySecret, isGeneratedRecoverySecret, type AgentWalletOptions, type BaseNetwork, type WalletBackupStore } from './index.js';
 import { readVoidlyCapabilities } from './voidlyCapabilities.js';
 import { registerAgentCommandTools } from './mcpAgentTools.js';
+import { registerSpendAllowanceTools, checkedSpendAllowanceToolStatus } from './mcpAllowanceTools.js';
+import { FileSpendAllowanceStore } from './allowanceClient.js';
+import { checkedSpendAllowanceGrant } from './spendAllowance.js';
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const fail = (error: unknown) => ({
@@ -147,7 +150,7 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
   if (options.network === 'base' && !options.allowedOrigins?.length) {
     throw new Error('Base mainnet requires an explicit payment origin allowlist before the MCP server starts');
   }
-  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.5.1' });
+  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.6.0' });
   let wallet: AgentWallet | undefined = dependencies.initialWallet;
   let generatedSecret: string | undefined;
   const requireWallet = () => {
@@ -182,6 +185,51 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
 
   registerAgentCommandTools(server, options, { requireWallet,
     fetcher: dependencies.commandFetch, env: dependencies.commandEnv });
+
+  const allowanceStore = new FileSpendAllowanceStore(stateDirectory());
+  const retainedGrant = async (id: string, includeDisabled = false) => {
+    if (memoryOnly) throw new Error('Allowances require durable approval state');
+    const current = requireWallet();
+    const grant = await allowanceStore.get(id, current.address.toLowerCase(),
+      current.network === 'base' ? 'eip155:8453' : 'eip155:84532', includeDisabled);
+    if (!grant) throw new Error('No retained owner-approved allowance');
+    return grant;
+  };
+  registerSpendAllowanceTools(server, {
+    async grant(input) {
+      if (memoryOnly) throw new Error('Allowances require durable approval state');
+      const grant = checkedSpendAllowanceGrant(input);
+      await allowanceStore.prepare(grant);
+      const result = checkedSpendAllowanceToolStatus(
+        await requireWallet().spendAllowanceRequest('grant', grant, grant), grant.grantId, grant);
+      if (result.status !== 'active') throw new Error('Allowance is not active');
+      await allowanceStore.enable(grant);
+      return result;
+    },
+    async status(id) {
+      const grant = await retainedGrant(id, true);
+      return requireWallet().spendAllowanceRequest('status', grant, {grantId:id});
+    },
+    async revoke(id) {
+      const grant = await retainedGrant(id, true);
+      await allowanceStore.disable(grant);
+      return requireWallet().spendAllowanceRequest('revoke', grant, {grantId:id});
+    },
+    enabledGrant: id => retainedGrant(id),
+    async buy({grant, listingId, version, input, maxUsdc}) {
+      const entry = grant.listings.find(item => item.listingId === listingId && item.version === version)!;
+      try {
+        return await boundedResponse(await requireWallet().payX402({
+          url: `${grant.origin}/v1/services/${listingId}/call`, method: 'POST', body: input,
+          maxAmountUsd: maxUsdc, expectedMarketplace: {listingId, version, payTo: entry.payTo},
+          spendAllowance: grant,
+        }));
+      } catch (error) {
+        if (error instanceof PaymentMayHaveSettledError) return {...error.toResult(), doNotRepay:true};
+        throw error;
+      }
+    },
+  });
 
   server.registerTool('voidly_capabilities', {
     description: 'Read Voidly\'s public capability manifest in one call, including each listed endpoint, related endpoints, availability, and coverage. No wallet is needed; listed routes are not live-service proof.',

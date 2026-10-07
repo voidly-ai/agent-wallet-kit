@@ -10,7 +10,7 @@ export function walletQuickstartGuide(network: BaseNetwork): Record<string, unkn
     '--listing', '<ABSOLUTE_LISTING_JSON>'];
   return {
     schema: 'voidly-wallet-quickstart/v1', command: 'quickstart', mode: 'guide_only',
-    package: { name: '@voidly/agent-wallet', version: '0.5.1' }, network, gateway,
+    package: { name: '@voidly/agent-wallet', version: '0.6.0' }, network, gateway,
     effects: { networkRequests: false, walletAccess: false, fileWrites: false, signing: false, payment: false },
     approval: {
       requiredBeforeExecution: true,

@@ -1,4 +1,7 @@
 import { isIP } from 'node:net';
+import { requestSpendAllowance } from './allowanceClient.js';
+import { checkedSpendAllowanceGrant, checkedSpendAllowanceReservation, assertSpendAllowanceAuthorizationWindow,
+  type SpendAllowanceGrant, type SpendAllowanceAction, type SpendAllowanceReservation } from './spendAllowance.js';
 import { createHash } from 'node:crypto';
 import { wrapFetchWithPayment, x402Client } from '@x402/fetch';
 import { ExactEvmScheme, getDefaultAsset, type ClientEvmSigner } from '@x402/evm';
@@ -30,6 +33,8 @@ import { prepareVoidlySellerRegistration as prepareSellerRegistration,
   type VoidlySellerQuickstartInput } from './sellerRegistration.js';
 
 export * from './backup.js';
+export * from './spendAllowance.js';
+export * from './allowanceClient.js';
 export * from './spend.js';
 export * from './marketplaceRecovery.js';
 export * from './marketplaceReceiptVerification.js';
@@ -59,6 +64,8 @@ export interface AgentWalletOptions {
 
 export interface PayX402Request {
   url: string;
+  /** Separate delegated path; caller must retain the owner's explicit approved grant. */
+  spendAllowance?: SpendAllowanceGrant;
   method?: 'GET' | 'POST';
   body?: unknown;
   /** A call-specific cap may lower the configured per-call limit. */
@@ -415,6 +422,19 @@ export class AgentWallet {
     }
   }
 
+  /** Signed non-payment allowance operation. Grant/revoke require explicit host approval. */
+  async spendAllowanceRequest(action: SpendAllowanceAction, input: SpendAllowanceGrant,
+    body: unknown): Promise<Record<string, unknown>> {
+    const grant = checkedSpendAllowanceGrant(input);
+    if (grant.payer !== this.address.toLowerCase() || grant.network !== NETWORKS[this.network].caip) {
+      throw new Error('Allowance does not match the loaded wallet');
+    }
+    checkedPaymentUrl(grant.origin, this.options.allowedOrigins);
+    const signer = this.signer as ClientEvmSigner & { signMessage?: (input: {message:string})=>Promise<`0x${string}`> };
+    if (!signer.signMessage) throw new Error('Allowance requires a payer EIP-191 signer');
+    return requestSpendAllowance(grant, action, body, value => signer.signMessage!(value), this.options.fetcher ?? fetch);
+  }
+
   async payX402(request: PayX402Request): Promise<Response> {
     if (!this.options.spendStore) throw new Error('A durable spend store is required before paying');
     if (this.options.spendStore.kind !== 'durable' && !this.options.unsafeAllowVolatileSpendStoreForTests) {
@@ -426,6 +446,11 @@ export class AgentWallet {
     if (method === 'GET' && request.body !== undefined) throw new Error('GET payment cannot contain a body');
     const listingId = marketplaceListingId(target, this.network);
     const expected = request.expectedMarketplace;
+    const allowance = request.spendAllowance ? checkedSpendAllowanceGrant(request.spendAllowance) : null;
+    if (allowance && (!listingId || !expected || allowance.origin !== target.origin ||
+      allowance.network !== NETWORKS[this.network].caip || allowance.payer !== this.address.toLowerCase())) {
+      throw new Error('Allowance requires an exact approved Marketplace identity');
+    }
     if (expected && (!listingId || expected.listingId !== listingId ||
       !Number.isSafeInteger(expected.version) || expected.version < 1 ||
       !ADDRESS.test(expected.payTo))) {
@@ -453,8 +478,19 @@ export class AgentWallet {
 
     const config = NETWORKS[this.network];
     const asset = getDefaultAsset(config.caip).asset;
+    let allowanceReservation: SpendAllowanceReservation | null = null;
+    const paymentSigner: ClientEvmSigner = allowance ? { ...this.signer,
+      // Supported external signers may expose address through a prototype getter.
+      address: this.signer.address,
+      signTypedData: async parameters => {
+        if (!allowanceReservation) throw new Error('Allowance reservation missing before payment signing');
+        const validBefore = (parameters.message as Record<string, unknown>).validBefore;
+        assertSpendAllowanceAuthorizationWindow(allowanceReservation, Number(validBefore), Date.now());
+        return this.signer.signTypedData(parameters);
+      },
+    } : this.signer;
     const client = new x402Client()
-      .register(config.caip, new ExactEvmScheme(this.signer))
+      .register(config.caip, new ExactEvmScheme(paymentSigner))
       .setSpendControls({ maxAmountPerPayment: `$${this.options.limits.perCallUsd}` });
     let pendingAttempt: Omit<MarketplaceAttempt, 'paymentKey' | 'createdAt'> | null = null;
     let savedAttempt: MarketplaceAttempt | null = null;
@@ -511,6 +547,20 @@ export class AgentWallet {
       }
       try {
         if (listingId) await attemptStore!.ensureCapacity();
+        if (allowance) {
+          const attempt = pendingAttempt;
+          if (!attempt || requirements.maxTimeoutSeconds > 60) throw new Error('Allowance quote contract unavailable');
+          const reply = await this.spendAllowanceRequest('reserve', allowance, { quoteId: attempt.quoteId });
+          const raw = reply.reservation as Record<string, unknown> | undefined;
+          if (!raw || reply.automaticRetry !== false) throw new Error('Allowance reservation unavailable');
+          const quoted = { quoteId: attempt.quoteId, resourceUrl: attempt.quoteUrl, listingId: attempt.listingId,
+            listingVersion: attempt.listingVersion, payTo: attempt.payTo, payer: attempt.wallet,
+            network: attempt.network, asset: attempt.asset, amountAtomic: attempt.amountAtomic,
+            inputSha256: attempt.quotedInputSha256, quoteExpiresAt: raw.quoteExpiresAt };
+          allowanceReservation = checkedSpendAllowanceReservation(allowance, quoted, raw, Date.now());
+          assertSpendAllowanceAuthorizationWindow(allowanceReservation,
+            Math.floor(Date.now() / 1000) + requirements.maxTimeoutSeconds + 1, Date.now());
+        }
         await this.options.spendStore!.reserve({
           wallet: this.address,
           network: this.network,
@@ -547,6 +597,11 @@ export class AgentWallet {
         String(value) !== attempt.amountAtomic) {
         throw new Error('Marketplace authorization payer, payee, nonce or amount is invalid');
       }
+      if (allowance) {
+        if (!allowanceReservation) throw new Error('Allowance reservation missing');
+        assertSpendAllowanceAuthorizationWindow(allowanceReservation,
+          Number((authorization as Record<string, unknown>).validBefore), Date.now());
+      }
       const paymentKey = keccak256(stringToBytes([
         config.caip, asset.toLowerCase(), payer.toLowerCase(), nonce.toLowerCase(),
       ].join('|')));
@@ -570,7 +625,8 @@ export class AgentWallet {
     try {
       const response = await paidFetch(target.href, {
         method,
-        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+        headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(allowance ? { 'x-voidpay-spend-allowance': allowance.grantId } : {}) },
         body,
         redirect: 'manual',
         signal: AbortSignal.timeout(30_000),
