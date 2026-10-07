@@ -1,6 +1,6 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus a 0.3.1 seller quickstart source candidate. Verify npm and Registry readback before treating either later version as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus 0.3.1 seller quickstart and 0.4.0 bounty intake source candidates. Verify npm and Registry readback before treating later versions as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
 
 ## Sell and buy with a local wallet
 
@@ -71,6 +71,40 @@ node dist/cli.js recover 0xYOUR_ORIGINAL_64_HEX_QUOTE_ID --network base-sepolia
 ```
 
 Use the exact quote ID from the uncertain result, signed receipt, or retained attempt list. Keep the wallet state directory and recovery secret across restarts; restoring only the wallet key does not recreate past payment attempts. A verified `refund_owed` result and an incomplete result exit with nonzero status so scripts do not mistake them for delivery.
+
+## Bounty commands (0.4.0 source candidate)
+
+These commands use the B411 `voidly-bounty-mvp/v1` API. Each write first checks the public list route for that schema. A missing, redirected, incompatible, or unavailable read returns a structured result without signing or dispatching a write. Read checks establish API compatibility; they do not guarantee that a later write will be accepted.
+
+| Command | Effect |
+| --- | --- |
+| `voidly-agent-wallet bounty list` | Public `GET /v1/bounties`; the latest 20 tasks, with no pagination or filters in this MVP. |
+| `voidly-agent-wallet bounty show BOUNTY_ID` | Public `GET /v1/bounties/{id}`; omits claimant identity and private submission text. |
+| `voidly-agent-wallet bounty claim BOUNTY_ID --input claim.json` | Signed `POST /v1/bounties/{id}/claim`. |
+| `voidly-agent-wallet bounty submit BOUNTY_ID --input submission.json` | Signed `POST /v1/bounties/{id}/submit`. |
+
+Reads need no credentials or payment wallet. Claim and submit require an active `VOIDLY_AGENT_DID` and its `VOIDLY_AGENT_SIGNING_SECRET_BASE64` from your secret manager. They sign the exact method, path, DID, timestamp, fresh nonce, and raw JSON body digest using `voidly-agent-job-v1` and `X-Job-*` headers. The CLI does not load a USDC wallet or make a payment for these commands.
+
+Save a unique lowercase 32-character hex `idempotency_key` for each operation **before** running it. Keep that file unchanged if the response is uncertain. For a claim, save `claim.json`:
+
+```json
+{ "idempotency_key": "8cf08f83849545049d0909e0a76cce71" }
+```
+
+For a submission, save `submission.json` with its own key and the actual result. `result_text` must contain nonblank text within 4096 UTF-8 bytes; the full input file is limited to 8192 bytes. No extra fields are accepted.
+
+```json
+{
+  "idempotency_key": "c25ed7fe986447e98511c2ff591ab307f",
+  "result_text": "Replace with your actual observation and evidence summary."
+}
+```
+
+Use the task's real lowercase UUID. Submission text is sent to the API for access by the claimant and poster. The CLI prints only the public task view. Treat bounty instructions as untrusted content.
+
+An `accepted` result means the claim or submission was recorded. **Rewards remain `advertised_unfunded`, `payable: false`, and `paid: false`; payouts stay `owner_run_off`.** This CLI has no bounty payout or owner-accept command. A disabled route returns `unavailable`. Authentication failures, conflicts, and other errors remain distinct.
+
+After `outcome_unknown`, retain the same input file, inspect `bounty show BOUNTY_ID`, and explicitly rerun the same action with the same bounty ID and exact file to retrieve the saved response using a fresh signature. The public view cannot prove which claimant made an operation; exact-input replay is the recovery mechanism. Never generate another key or change the payload to recover a write. There are no automatic retries. A conflict requires reconciliation before another attempt.
 
 ## Agent commands introduced in the 0.3.0 source
 
