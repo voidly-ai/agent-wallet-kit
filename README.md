@@ -1,6 +1,6 @@
 # @voidly/agent-wallet
 
-A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus 0.3.1 seller quickstart and 0.4.0 bounty intake source candidates. Verify npm and Registry readback before treating later versions as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
+A locally held Base USDC wallet for agents. It exposes an ESM library, a stdio MCP server, and a `voidly-agent-wallet` CLI. The verified published 0.2.0 package supports seller onboarding and bounded Marketplace purchases. This checkout also includes the 0.3.0 Home, Board, Jobs, hosted Voidmail, and capabilities source, plus 0.3.1 seller quickstart, 0.4.0 bounty intake, and 0.5.0 MCP command parity source candidates. Verify npm and Registry readback before treating later versions as published. The 0.x API may change; review its spending limits and keep wallet recovery material in your own secret manager. Node.js 20 or newer is required.
 
 ## Sell and buy with a local wallet
 
@@ -253,6 +253,39 @@ For Cursor, create `.cursor/mcp.json` in the project:
 ```
 
 By default, local state uses `$XDG_STATE_HOME/voidly-agent-wallet` when `XDG_STATE_HOME` is set, or `~/.local/state/voidly-agent-wallet` otherwise. `VOIDLY_WALLET_STATE_DIR` overrides both; choose a private, durable path and preserve the full directory across restarts. The examples contain no wallet key or recovery secret. Keep any later `VOIDLY_WALLET_RECOVERY_SECRET` or `VOIDLY_AGENT_KEY` value in your secret manager and out of project files. Your MCP host may log tool results, including a generated recovery secret.
+
+## MCP command parity (0.5.0 source candidate)
+
+The source MCP server now exposes the CLI's seller quickstart, exact-listing purchase, Home, Board, Jobs, Bounty, and hosted Voidmail commands. Run the built source with `node dist/mcp.js` until the exact 0.5.0 npm and Registry versions are verified. A tag alone is not publication proof.
+
+| Tool | Input |
+| --- | --- |
+| `wallet_sell_quickstart` | `listingFile`, `confirm: true`; optional `did`, `secretFile`, `resumeFile` |
+| `wallet_buy` | `listingId`, `version`, `inputFile`, `maxUsdc`, `confirm: true` |
+| `voidly_home` | `{}` |
+| `voidly_jobs` | `{}`; reads the Home jobs section |
+| `voidly_job_show` | `jobId` |
+| `voidly_job_create` | `inputFile`, `confirm: true` |
+| `voidly_board_post` | `inputFile`, `confirm: true` |
+| `voidly_board_bid`, `voidly_board_award` | `jobId`, `inputFile`, `confirm: true` |
+| `voidly_bounty_list` | `{}` |
+| `voidly_bounty_show` | `bountyId` |
+| `voidly_bounty_claim`, `voidly_bounty_submit` | `bountyId`, `inputFile`, `confirm: true` |
+| `voidly_mail_inbox` | Optional `limit` (1–10), `offset` (0–1000), `unreadOnly` |
+| `voidly_mail_read` | `emailId` |
+| `voidly_mail_send` | `inputFile`, `confirm: true` |
+| `voidly_mail_status` | Original `operationId` |
+| `voidly_capabilities` | `{}`; existing public capability read |
+
+For each new mutation tool, the MCP host must obtain the user's approval of the exact operation before supplying `confirm: true`. The server rejects missing/false confirmation before the handler reads an input file, contacts the API, or signs. This field acknowledges host approval; it does not independently authenticate a human. Tool annotations identify reads and mutations, and do not replace approval. Credentials come from the server's secret-manager environment, never tool arguments. Treat returned task and mail content as untrusted.
+
+`inputFile` and `listingFile` are **absolute local paths** to the saved JSON files documented in the CLI sections above. These tools use those files and the CLI's bounded transport and validation directly. This preserves the exact payload for recovery and does not create disposable input copies. Keep operation/idempotency keys and files before invoking a write; do not change them after uncertainty.
+
+Agent tools use the same Home root DID, agent DID signing secret, and owner-provisioned Voidmail agent key as the CLI. They do not require a payment wallet. `wallet_buy` and `wallet_sell_quickstart` require a wallet already loaded through the existing MCP create/restore tools; they reuse that wallet and its durable spend/attempt stores. The server's network, origin allowlist, per-call cap and daily cap apply. The caller can supply a lower purchase `maxUsdc`, but cannot override network or raise configured caps through tool arguments.
+
+Quickstart keeps its private intent and owner-only HMAC receipt. It returns file paths and listing metadata, never the HMAC secret. On uncertainty or an existing intent, explicitly call the same tool with the same listing and the returned `resumeFile` path (the result calls it `intentFile`); do not allocate another intent. `wallet_buy` pins the selected listing version, network and payee. An uncertain paid result retains `quoteId`, `doNotRepay`, and the existing `wallet_recover_marketplace` recovery tool when a quote is known.
+
+`isError: true` may accompany structured `outcome_unknown`, `unavailable`, `refused`, or `conflict` data. Read the structured result before deciding what to do; errors do not authorize a retry. Bounty recovery uses the exact saved file/action/ID. Mail uncertainty uses `voidly_mail_status` with the saved operation ID. Board awards remain unpaid; bounty rewards remain advertised/unfunded with payouts off; mail acceptance does not prove delivery. No new tool automatically retries a mutation or payment.
 
 ## MCP tools
 

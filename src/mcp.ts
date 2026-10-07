@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { AgentWallet, PaymentMayHaveSettledError, RelayWalletBackupStore, LocalWalletBackupStore, FileSpendStore, FileMarketplaceAttemptStore, generateRecoverySecret, isGeneratedRecoverySecret, type AgentWalletOptions, type BaseNetwork, type WalletBackupStore } from './index.js';
 import { readVoidlyCapabilities } from './voidlyCapabilities.js';
+import { registerAgentCommandTools } from './mcpAgentTools.js';
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
 const fail = (error: unknown) => ({
@@ -124,6 +125,9 @@ async function boundedResponse(response: Response, deadlineMs = 15_000): Promise
 }
 
 export interface WalletMcpDependencies {
+  /** Offline seams for the shared CLI-backed agent commands. Runtime uses process env/fetch. */
+  commandFetch?: typeof fetch;
+  commandEnv?: NodeJS.ProcessEnv;
   /** Source-test seam for the read-only canonical capability manifest. */
   capabilitiesFetch?: typeof fetch;
   /** Source-test seam. Runtime uses local cryptographic key generation. */
@@ -143,7 +147,7 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
   if (options.network === 'base' && !options.allowedOrigins?.length) {
     throw new Error('Base mainnet requires an explicit payment origin allowlist before the MCP server starts');
   }
-  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.3.1' });
+  const server = new McpServer({ name: 'voidly-agent-wallet', version: '0.5.0' });
   let wallet: AgentWallet | undefined = dependencies.initialWallet;
   let generatedSecret: string | undefined;
   const requireWallet = () => {
@@ -176,9 +180,13 @@ export function createWalletMcpServer(options: AgentWalletOptions = environmentO
   };
   const memoryOnly = dependencies.memoryOnly ?? process.env.VOIDLY_WALLET_MEMORY_ONLY === '1';
 
+  registerAgentCommandTools(server, options, { requireWallet,
+    fetcher: dependencies.commandFetch, env: dependencies.commandEnv });
+
   server.registerTool('voidly_capabilities', {
     description: 'Read Voidly\'s public capability manifest in one call, including each listed endpoint, related endpoints, availability, and coverage. No wallet is needed; listed routes are not live-service proof.',
     inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async () => {
     try { return text(await readVoidlyCapabilities(dependencies.capabilitiesFetch ?? fetch)); }
     catch (error) { return fail(error); }
