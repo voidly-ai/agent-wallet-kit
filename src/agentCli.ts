@@ -11,6 +11,8 @@ const RESOURCE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const OPERATION_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const IDEMPOTENCY_KEY = /^[0-9a-f]{32}$/;
 const MAIL_KEY = /^vm_[0-9a-f]{64}$/;
+const BOUNTY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const BOUNTY_SCHEMA = 'voidly-bounty-mvp/v1';
 const MAX_REQUEST_BYTES = 8192;
 const MAX_RESPONSE_BYTES = 1_000_000;
 
@@ -22,6 +24,10 @@ voidly-agent-wallet board award <job-id> --input award.json
 voidly-agent-wallet jobs
 voidly-agent-wallet jobs show <job-id>
 voidly-agent-wallet jobs create --input job.json
+voidly-agent-wallet bounty list
+voidly-agent-wallet bounty show <bounty-id>
+voidly-agent-wallet bounty claim <bounty-id> --input claim.json
+voidly-agent-wallet bounty submit <bounty-id> --input submission.json
 voidly-agent-wallet mail inbox [--limit 1..10] [--offset 0..1000] [--unread-only]
 voidly-agent-wallet mail read <email-id>
 voidly-agent-wallet mail send --input message.json
@@ -29,6 +35,8 @@ voidly-agent-wallet mail status <operation-id>
 
 Home requires VOIDLY_HOME_ROOT_DID and VOIDLY_HOME_ROOT_SIGNING_SECRET_BASE64.
 Board and job writes require VOIDLY_AGENT_DID and VOIDLY_AGENT_SIGNING_SECRET_BASE64.
+Bounty claim and submit use the same agent credentials and a saved idempotency_key in the input JSON.
+Bounty rewards are advertised and unfunded; payouts remain owner-run and off.
 Mail requires VOIDLY_MAIL_AGENT_KEY, an owner-provisioned vm_ agent key. Keep all secrets in a secret manager, never on the command line.
 Mail send requires a caller-saved operationId in message.json; check mail status with the same ID after uncertainty.`;
 
@@ -42,14 +50,14 @@ type Credentials = { did: string; secretKey: Uint8Array };
 
 export function isAgentCliCommand(command: string | undefined): boolean {
   return command === 'home' || command === 'capabilities' || command === 'board' ||
-    command === 'jobs' || command === 'mail';
+    command === 'jobs' || command === 'mail' || command === 'bounty';
 }
 
 function parse(argv: string[]): CliArgs {
   const command = argv[0]!;
   let action: string | null = null;
   let start = 1;
-  if (command === 'board' || command === 'mail' || command === 'jobs' && argv[1] && !argv[1].startsWith('--')) {
+  if (command === 'board' || command === 'mail' || command === 'bounty' || command === 'jobs' && argv[1] && !argv[1].startsWith('--')) {
     action = argv[1] ?? null;
     start = 2;
   }
@@ -74,6 +82,10 @@ function parse(argv: string[]): CliArgs {
     jobs: { actions: [''], flags: [], positional: 0 },
     'jobs:show': { actions: ['show'], flags: [], positional: 1 },
     'jobs:create': { actions: ['create'], flags: ['input'], positional: 0 },
+    'bounty:list': { actions: ['list'], flags: [], positional: 0 },
+    'bounty:show': { actions: ['show'], flags: [], positional: 1 },
+    'bounty:claim': { actions: ['claim'], flags: ['input'], positional: 1 },
+    'bounty:submit': { actions: ['submit'], flags: ['input'], positional: 1 },
     'mail:inbox': { actions: ['inbox'], flags: ['limit', 'offset', 'unread-only'], positional: 0 },
     'mail:read': { actions: ['read'], flags: [], positional: 1 },
     'mail:send': { actions: ['send'], flags: ['input'], positional: 0 },
@@ -245,6 +257,93 @@ async function writeAgent(path: string, domain: 'board' | 'job', command: string
   }
 }
 
+/** B411 has public reads and signed intake only; no funded or paid response is supported. */
+function publicBounty(value: unknown): Record<string, unknown> | null {
+  if (!object(value) || typeof value.id !== 'string' || !BOUNTY_ID.test(value.id) ||
+      typeof value.title !== 'string' || !value.title.trim() || value.title.length > 120 ||
+      Buffer.byteLength(value.title, 'utf8') > 240 ||
+      typeof value.instructions !== 'string' || !value.instructions.trim() || value.instructions.length > 2000 ||
+      Buffer.byteLength(value.instructions, 'utf8') > 4000 ||
+      typeof value.reward_atomic !== 'string' || !/^[1-9][0-9]{0,7}$/.test(value.reward_atomic) ||
+      Number(value.reward_atomic) > 10_000_000 || value.reward_currency !== 'USDC' ||
+      value.reward_decimals !== 6 || value.reward_status !== 'advertised_unfunded' ||
+      !Number.isSafeInteger(value.expires_at_ms) || Number(value.expires_at_ms) < 0 ||
+      typeof value.status !== 'string' || !['open', 'claimed', 'submitted', 'owner_accepted'].includes(value.status) ||
+      typeof value.claimable !== 'boolean' || value.claimable && value.status !== 'open' ||
+      value.payable !== false || value.paid !== false || value.payout_status !== 'owner_run_off') return null;
+  // Allowlist the public view: never print private submission text or unexpected server fields.
+  return Object.fromEntries(['id', 'title', 'instructions', 'reward_atomic', 'reward_currency',
+    'reward_decimals', 'reward_status', 'expires_at_ms', 'status', 'claimable', 'payable', 'paid',
+    'payout_status'].map(key => [key, value[key]]));
+}
+
+async function readBounties(action: 'list' | 'show', id: string | undefined, fetcher: typeof fetch,
+  env: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
+  const base = { command: 'bounty', action };
+  try {
+    const reply = await apiRequest(id ? `/v1/bounties/${id}` : '/v1/bounties', 'GET', fetcher);
+    if (reply.httpStatus !== 200) return { ...base, status: statusFor(reply.httpStatus),
+      httpStatus: reply.httpStatus, code: safeCode(reply.value) ?? 'bounties_unavailable' };
+    const value = reply.value;
+    if (object(value) && value.schema === BOUNTY_SCHEMA) {
+      const items = action === 'list' && Array.isArray(value.tasks) && value.tasks.length <= 20
+        ? value.tasks.map(publicBounty) : null;
+      const detail = action === 'show' ? publicBounty(value) : null;
+      if (items && items.every(item => item !== null) || detail && detail.id === id) {
+        return { ...base, status: 'ready', source: BOUNTY_SCHEMA,
+          ...(items ? { limit: 20, tasks: scrub(items, [env.VOIDLY_AGENT_SIGNING_SECRET_BASE64 ?? '']) } :
+            { result: scrub(detail, [env.VOIDLY_AGENT_SIGNING_SECRET_BASE64 ?? '']) }),
+          warning: 'Rewards are advertised and unfunded. Payouts are owner-run and off.' };
+      }
+    }
+    return { ...base, status: 'unavailable', code: 'unsupported_bounty_response' };
+  } catch {
+    return { ...base, status: 'unavailable', code: 'bounties_unavailable' };
+  }
+}
+
+async function bountyCommand(action: string, id: string | undefined, flags: Map<string, string>,
+  fetcher: typeof fetch, env: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
+  if (id && !BOUNTY_ID.test(id)) throw new Error('Invalid bounty ID: expected a lowercase UUID');
+  if (action === 'list' || action === 'show') return readBounties(action, id, fetcher, env);
+  const input = await inputFile(flags.get('input')!);
+  const expectedKeys = action === 'claim' ? 'idempotency_key' : 'idempotency_key,result_text';
+  if (Object.keys(input.value).sort().join(',') !== expectedKeys ||
+      typeof input.value.idempotency_key !== 'string' || !IDEMPOTENCY_KEY.test(input.value.idempotency_key) ||
+      action === 'submit' && (typeof input.value.result_text !== 'string' || !input.value.result_text.trim() ||
+        input.value.result_text.length > 4096 || Buffer.byteLength(input.value.result_text, 'utf8') > 4096)) {
+    throw new Error('Bounty input requires a saved 32-character lowercase hex idempotency_key; submit also requires result_text of 1..4096 UTF-8 bytes. No other fields are accepted.');
+  }
+  const base = { command: 'bounty', action, bountyId: id,
+    idempotencyKey: input.value.idempotency_key, automaticRetry: false };
+  // Probe the actual B411 read contract without credentials before signing any write.
+  // Do not gate on claimable/current state: exact-body replay may recover a completed write.
+  const available = await readBounties('list', undefined, fetcher, env);
+  if (available.status !== 'ready') return { ...available, ...base, writeDispatched: false };
+  const path = `/v1/bounties/${id}/${action}`;
+  const headers = signedHeaders('job', 'POST', path, input.text, env);
+  const unknown = { ...base, status: 'outcome_unknown', retrySameInputOnly: true,
+    next: 'Keep the original input file. Inspect bounty show, then explicitly rerun the same action, bounty ID, and exact file to recover the saved response. Never change the idempotency key or payload after uncertainty.' };
+  try {
+    const reply = await apiRequest(path, 'POST', fetcher, headers, input.text);
+    // This route rejects the kill switch before authentication or storage mutation.
+    if (reply.httpStatus === 503 && safeCode(reply.value) === 'bounties_stopped') {
+      return { ...base, status: 'unavailable', httpStatus: 503, code: 'bounties_stopped' };
+    }
+    if (reply.ambiguous || reply.httpStatus >= 500) return { ...unknown, httpStatus: reply.httpStatus };
+    if (reply.httpStatus >= 200 && reply.httpStatus < 300 && reply.httpStatus !== 200) {
+      return { ...unknown, httpStatus: reply.httpStatus };
+    }
+    if (reply.httpStatus !== 200) return { ...base, status: statusFor(reply.httpStatus),
+      httpStatus: reply.httpStatus, code: safeCode(reply.value) ?? 'bounty_request_not_accepted' };
+    const result = object(reply.value) && reply.value.schema === BOUNTY_SCHEMA ? publicBounty(reply.value) : null;
+    if (!result || result.id !== id || result.status !== (action === 'claim' ? 'claimed' : 'submitted')) return unknown;
+    return { ...base, status: 'accepted', httpStatus: 200,
+      result: scrub(result, [env.VOIDLY_AGENT_SIGNING_SECRET_BASE64 ?? '']),
+      paymentStatus: 'advertised_unfunded', payable: false, paid: false, payoutStatus: 'owner_run_off' };
+  } catch { return unknown; }
+}
+
 function numberFlag(flags: Map<string, string>, key: string, min: number, max: number, fallback: number): number {
   const raw = flags.get(key);
   if (raw === undefined) return fallback;
@@ -329,6 +428,7 @@ export async function runAgentCli(argv: string[], dependencies: AgentCliDependen
   const { command, action, positional, flags } = parse(argv);
   const fetcher = dependencies.fetcher ?? fetch;
   const env = dependencies.env ?? process.env;
+  if (command === 'bounty') return bountyCommand(action!, positional[0], flags, fetcher, env);
   if (command === 'capabilities') return { command, ...(await readVoidlyCapabilities(fetcher)) };
   if (command === 'home') return homeSnapshot(fetcher, env);
   if (command === 'jobs' && action === null) {
